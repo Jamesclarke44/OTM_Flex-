@@ -1,177 +1,52 @@
-# 📈 OTM Flex
+# OTM Flex Calculator
 
-**Stay Out of the Money. Stay Flexible. Collect Premium.**
+A Streamlit tool that implements the OTM Flex credit-spread rule book:
+**Trend → Delta → Distance → Flex.**
 
-OTM Flex is a rules-based credit spread trading system designed to generate consistent option income through disciplined trend-following and flexible strike selection.
+Manual data entry for now (price, EMA20, ATR, deltas) — designed so a live
+data source (yfinance, IBKR, etc.) can be dropped in later without changing
+the calculator logic.
 
-The core philosophy is simple:
+## What it does
 
-> When in doubt, go further OTM.
+1. **Trend** — compares price to EMA20 to pick Bull Put Spread vs Bear Call Spread.
+2. **Distance** — computes 1x–3x ATR strikes and flags which multiples fit your
+   stated trend strength (strong/average/choppy).
+3. **Delta cross-check** — an editable table where you enter candidate strikes
+   and their deltas; it flags which ones hit both the 0.10–0.18 delta band
+   *and* the ATR distance guideline, and suggests the closest qualifying
+   strike (the "golden rule" pick).
+4. **Expiration** — flags whether your chosen DTE is inside the typical 7–45
+   DTE window.
+5. **Credit & profit target** — max loss, 50%-of-credit profit target, and
+   return on capital at risk.
+6. **Position sizing** — max contracts given your account size and risk %
+   per trade.
 
----
-
-# Features
-
-✅ Bull Put / Bear Call determination
-
-✅ EMA20 trend analysis
-
-✅ Delta-based strike selection
-
-✅ ATR distance evaluation
-
-✅ OTM Flex scoring system
-
-✅ Trade approval status
-
-✅ iPhone-friendly Streamlit interface
-
----
-
-# OTM Flex Rules
-
-## Trend Rule
-
-- Price above EMA20 → Bull Put Spread
-- Price below EMA20 → Bear Call Spread
-
-## Delta Rule
-
-Target short strike delta:
-
-0.10 – 0.18
-
-## Flex Rule
-
-If risk increases:
-
-- Move further OTM
-- Lower delta
-- Increase distance
-
-Do not automatically reject a trade.
-
-## Distance Rule
-
-Use ATR as a reality check.
-
-- Strong trend → 1-2 ATR distance
-- Normal trend → 2 ATR distance
-- Weak/choppy trend → 2-3 ATR distance
-
-## Profit Rule
-
-Take profits around:
-
-50% of max profit
-
----
-
-# OTM Flex Score
-
-The app calculates a score out of 100.
-
-| Category | Weight |
-|----------|----------|
-| Trend | 40 |
-| Delta | 30 |
-| Credit | 20 |
-| Distance | 10 |
-
-### Rating Scale
-
-- 90-100 = Excellent
-- 80-89 = Good
-- 70-79 = Acceptable
-- Below 70 = Pass
-
----
-
-# Installation
-
-Create a virtual environment:
-
-```bash
-python -m venv .venv
-```
-
-Activate:
-
-Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-Mac/Linux:
-
-```bash
-source .venv/bin/activate
-```
-
-Install dependencies:
+## Run locally
 
 ```bash
 pip install -r requirements.txt
-```
-
----
-
-# Run the App
-
-```bash
 streamlit run app.py
 ```
 
-The browser will automatically open.
+## Push to GitHub
 
----
+```bash
+git init
+git add .
+git commit -m "Initial OTM Flex calculator"
+git branch -M main
+git remote add origin <your-repo-url>
+git push -u origin main
+```
 
-# Version 1
+## Next steps (when you're ready to wire up live data)
 
-Current capabilities:
-
-- Manual trade inputs
-- OTM Flex scoring
-- Trade approval engine
-- ATR distance calculations
-- Delta validation
-
----
-
-# Future Versions
-
-## Version 2
-
-- Live stock data
-- Automatic EMA20 calculation
-- Automatic ATR calculation
-
-## Version 3
-
-- Option chain integration
-- Recommended strike selection
-- OTM Flex trade scanner
-
-## Version 4
-
-- Portfolio tracking
-- Position sizing
-- Trade journal
-- Performance analytics
-
----
-
-# OTM Flex Philosophy
-
-Trend determines direction.
-
-Distance determines safety.
-
-Flexibility determines consistency.
-
----
-
-## Motto
-
-> Stay Out of the Money. Stay Flexible. Collect Premium.
+- Swap the manual `price` / `ema20` / `atr` inputs for a `yfinance` (or IBKR)
+  fetch, keeping the rest of the calculation logic untouched.
+- Replace the manual delta table with a live option-chain pull, filtered to
+  strikes near the ATR-implied range before you even look at delta.
+- The core functions (`evaluate_row`, the ATR table logic) are pure and
+  don't touch Streamlit state, so they can be lifted into a separate
+  `logic.py` module and unit-tested once the app grows.
