@@ -11,6 +11,7 @@ Run locally:
 
 import streamlit as st
 import pandas as pd
+import math
 
 st.set_page_config(page_title="OTM Flex Calculator", page_icon="📉", layout="centered")
 
@@ -167,7 +168,26 @@ with st.expander("Trend strength breakdown", expanded=False):
 # ---------------------------------------------------------------------------
 st.header(f"2. Distance — ATR Reality Check ({option_type or '—'})")
 
-atr = st.number_input("ATR (e.g. 14-day)", min_value=0.01, value=2.50, step=0.01, format="%.2f")
+col_atr, col_inc = st.columns(2)
+with col_atr:
+    atr = st.number_input("ATR (e.g. 14-day)", min_value=0.01, value=2.50, step=0.01, format="%.2f")
+with col_inc:
+    strike_increment = st.number_input(
+        "Strike increment ($)",
+        min_value=0.01,
+        value=1.0,
+        step=0.5,
+        help="e.g. SPY = 1, many stocks = 2.5 or 5 — implied strikes are rounded to a real, tradable strike.",
+    )
+
+
+def round_to_increment(value, increment, side):
+    """Round to the nearest real strike, biased further OTM (floor for puts, ceil for calls)."""
+    if increment <= 0:
+        return round(value, 2)
+    steps = value / increment
+    steps = math.floor(steps) if side == "put" else math.ceil(steps)
+    return round(steps * increment, 2)
 
 atr_guidance = {
     "Strong": (1.0, 2.0),
@@ -182,9 +202,11 @@ atr_rows = []
 for mult in [1.0, 1.5, 2.0, 2.5, 3.0]:
     distance = atr * mult
     if side == "put":
-        strike = price - distance
+        raw_strike = price - distance
+        strike = round_to_increment(raw_strike, strike_increment, side)
     elif side == "call":
-        strike = price + distance
+        raw_strike = price + distance
+        strike = round_to_increment(raw_strike, strike_increment, side)
     else:
         strike = None
     in_range = low_mult <= mult <= high_mult
@@ -192,7 +214,7 @@ for mult in [1.0, 1.5, 2.0, 2.5, 3.0]:
         {
             "ATR multiple": f"{mult}x",
             "Distance ($)": round(distance, 2),
-            "Implied strike": round(strike, 2) if strike is not None else "—",
+            "Implied strike": strike if strike is not None else "—",
             "Within guideline": "✅" if in_range else "",
         }
     )
@@ -211,7 +233,11 @@ st.caption(
 strike_col_name = f"{option_type} Strike" if option_type else "Strike"
 default_rows = pd.DataFrame(
     {
-        strike_col_name: [round(price - atr * m, 2) if side == "put" else round(price + atr * m, 2) for m in [1.0, 1.5, 2.0, 2.5, 3.0]],
+        strike_col_name: [
+            round_to_increment(price - atr * m, strike_increment, side) if side == "put"
+            else round_to_increment(price + atr * m, strike_increment, side)
+            for m in [1.0, 1.5, 2.0, 2.5, 3.0]
+        ],
         "Delta": [0.22, 0.18, 0.14, 0.11, 0.08],
     }
 )
