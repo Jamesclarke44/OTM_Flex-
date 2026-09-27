@@ -49,15 +49,23 @@ ema200 = st.number_input("EMA200", min_value=0.01, value=90.00, step=0.01, forma
 if price > ema20:
     direction = "Bull Put Spread"
     side = "put"
+    option_type = "PUT"
     st.success(f"Price is above EMA20 → **{direction}**")
 elif price < ema20:
     direction = "Bear Call Spread"
     side = "call"
+    option_type = "CALL"
     st.error(f"Price is below EMA20 → **{direction}**")
 else:
     direction = None
     side = None
+    option_type = None
     st.warning("Price equals EMA20 — no clear trend signal. Consider waiting or checking a longer timeframe.")
+
+if option_type == "PUT":
+    st.markdown("### Option Type: 🟢 **PUT** — sell puts below current price")
+elif option_type == "CALL":
+    st.markdown("### Option Type: 🔴 **CALL** — sell calls above current price")
 
 # ---------------------------------------------------------------------------
 # 1b. Momentum inputs (feed the auto trend-strength score)
@@ -157,7 +165,7 @@ with st.expander("Trend strength breakdown", expanded=False):
 # ---------------------------------------------------------------------------
 # 2. Distance (ATR reality check)
 # ---------------------------------------------------------------------------
-st.header("2. Distance — ATR Reality Check")
+st.header(f"2. Distance — ATR Reality Check ({option_type or '—'})")
 
 atr = st.number_input("ATR (e.g. 14-day)", min_value=0.01, value=2.50, step=0.01, format="%.2f")
 
@@ -194,12 +202,16 @@ st.dataframe(pd.DataFrame(atr_rows), hide_index=True, use_container_width=True)
 # ---------------------------------------------------------------------------
 # 3. Delta cross-check
 # ---------------------------------------------------------------------------
-st.header("3. Delta Cross-Check")
-st.caption("Enter candidate strikes and their short-strike delta (from your broker's chain) to find the sweet spot.")
+st.header(f"3. Delta Cross-Check ({option_type or '—'})")
+st.caption(
+    f"Enter candidate {option_type.lower() if option_type else ''} strikes and their short-strike delta "
+    "(from your broker's chain) to find the sweet spot."
+)
 
+strike_col_name = f"{option_type} Strike" if option_type else "Strike"
 default_rows = pd.DataFrame(
     {
-        "Strike": [round(price - atr * m, 2) if side == "put" else round(price + atr * m, 2) for m in [1.0, 1.5, 2.0, 2.5, 3.0]],
+        strike_col_name: [round(price - atr * m, 2) if side == "put" else round(price + atr * m, 2) for m in [1.0, 1.5, 2.0, 2.5, 3.0]],
         "Delta": [0.22, 0.18, 0.14, 0.11, 0.08],
     }
 )
@@ -216,9 +228,9 @@ edited = st.data_editor(
 def evaluate_row(row):
     delta_ok = 0.10 <= row["Delta"] <= 0.18
     if side == "put":
-        distance = price - row["Strike"]
+        distance = price - row[strike_col_name]
     elif side == "call":
-        distance = row["Strike"] - price
+        distance = row[strike_col_name] - price
     else:
         distance = None
     atr_mult = distance / atr if (distance is not None and atr) else None
@@ -241,11 +253,11 @@ if side is not None and not edited.empty:
     if not starred.empty:
         # Closest to price among the qualifying strikes = OTM Flex "golden rule" pick
         if side == "put":
-            best = starred.loc[starred["Strike"].idxmax()]
+            best = starred.loc[starred[strike_col_name].idxmax()]
         else:
-            best = starred.loc[starred["Strike"].idxmin()]
+            best = starred.loc[starred[strike_col_name].idxmin()]
         st.info(
-            f"**Suggested strike (golden rule — closest qualifying strike): {best['Strike']}** "
+            f"**Suggested {option_type} strike (golden rule — closest qualifying): {best[strike_col_name]}** "
             f"(delta {best['Delta']:.2f}, {best['ATR multiple']} ATR away)"
         )
     else:
