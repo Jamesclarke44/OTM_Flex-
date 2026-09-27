@@ -1,34 +1,8 @@
-"""
-OTM Flex™ — Credit Spread Strike Selection Engine
+# app.py
+# OTM Flex™ — Credit Spread Strike Selection Calculator
 
-PHILOSOPHY
-----------
-Trend → Delta → Distance → Flex
-
-The engine is designed to HELP select a credit spread.
-It does not attempt to predict the market.
-
-Core OTM Flex rules:
-    1. Price above EMA20 → Bull Put Spread
-    2. Price below EMA20 → Bear Call Spread
-    3. Target short strike delta = 0.10–0.18
-    4. Distance is the primary defence
-    5. ATR is a reality check
-    6. If uncomfortable → move further OTM
-    7. Typical DTE = 7–45
-    8. Take profit around 50%
-    9. Avoid holding stock spreads through earnings
-   10. Require acceptable credit
-   11. Size positions conservatively
-   12. Stay flexible
-
-Run:
-    pip install -r requirements.txt
-    streamlit run app.py
-"""
-
-from datetime import date, datetime, timedelta
 import math
+from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
@@ -36,128 +10,31 @@ import yfinance as yf
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
-    page_title="OTM Flex™ Credit Spread Engine",
-    page_icon="📉",
-    layout="centered",
-)
-
-st.title("📉 OTM Flex™")
-st.subheader("Credit Spread Strike Selection Engine")
-
-st.caption(
-    "Trend → Delta → Distance → Flex"
+    page_title="OTM Flex™",
+    page_icon="📊",
+    layout="wide",
 )
 
 
 # ============================================================
-# RULE BOOK
+# CONSTANTS
 # ============================================================
 
-with st.expander("📖 OTM Flex™ Rule Book", expanded=False):
+CONTRACT_MULTIPLIER = 100
 
-    st.markdown(
-        """
-### 1. Trend Rule
-
-**Bull Put Spread**
-- Price above EMA20
-- Preferably trending higher
-
-**Bear Call Spread**
-- Price below EMA20
-- Preferably trending lower
-
----
-
-### 2. Strike Selection
-
-Target short strike delta:
-
-**0.10–0.18**
-
-This is the preferred OTM Flex starting zone.
-
----
-
-### 3. Flex Rule
-
-If the trade feels too risky:
-
-**Move further OTM.**
-
-Do not automatically reject the trade because of:
-- elevated volatility
-- weaker trend
-- support/resistance
-- uncertainty
-
-Instead, move the short strike further OTM.
-
----
-
-### 4. Risk Management
-
-Distance is the primary defence.
-
-Use:
-- Lower delta
-- More distance
-- Wider margin of safety
-
----
-
-### 5. Expiration
-
-Typical:
-
-**7–45 DTE**
-
----
-
-### 6. Profit Taking
-
-Close around:
-
-**50% of maximum profit**
-
----
-
-### 7. Losing Trade
-
-If threatened:
-
-1. Re-evaluate trend
-2. Re-check short-strike delta
-3. Re-check distance
-4. Consider reducing risk
-5. Consider rolling if risk remains manageable
-
----
-
-### 8. Position Sizing
-
-One spread should be uncomfortable if it loses,
-but never catastrophic to the account.
-
----
-
-### 9. Golden Rule
-
-**Choose the closest strike that still lets you sleep well at night.**
-
----
-
-### OTM Flex Motto
-
-**Stay out of the money. Stay flexible. Collect premium.**
-
-**When in doubt, go further OTM — not out of the trade.**
-"""
-    )
+RISK_LEVELS = {
+    "1%": 0.01,
+    "2%": 0.02,
+    "3%": 0.03,
+    "5%": 0.05,
+    "10%": 0.10,
+    "15%": 0.15,
+    "20%": 0.20,
+}
 
 
 # ============================================================
@@ -165,2566 +42,1484 @@ but never catastrophic to the account.
 # ============================================================
 
 defaults = {
-    "price": 100.00,
-    "ema20": 98.00,
-    "ema50": 96.00,
-    "ema200": 90.00,
-    "rsi": 55.0,
-    "macd_line": 0.30,
-    "macd_signal": 0.15,
-    "atr": 2.50,
-    "next_earnings_date": None,
-    "data_fetched_at": None,
-    "expirations": [],
-    "chain_df": None,
-    "atm_iv": 20.0,
-    "atm_iv_dte": None,
-    "chain_version": 0,
+    "ticker": "SPY",
+    "price": None,
+    "previous_close": None,
+    "history": None,
+    "market_loaded": False,
+    "market_error": None,
 }
 
 for key, value in defaults.items():
-
     if key not in st.session_state:
         st.session_state[key] = value
 
 
 # ============================================================
-# MATH
+# FUNCTIONS
 # ============================================================
 
-def norm_cdf(x):
-    """Standard normal cumulative distribution."""
-    return 0.5 * (
-        1 + math.erf(x / math.sqrt(2))
+def flatten_yfinance_columns(df):
+    """
+    Handles newer yfinance versions that may return MultiIndex columns.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    return df
+
+
+def get_market_data(ticker_symbol):
+    """
+    Get daily historical data plus the latest available quote.
+
+    Important:
+    - Historical Close = last completed daily candle
+    - Current/Last Price = latest available market quote
+    """
+
+    ticker_obj = yf.Ticker(ticker_symbol)
+
+    # --------------------------------------------------------
+    # Historical data
+    # --------------------------------------------------------
+
+    history = ticker_obj.history(
+        period="1y",
+        interval="1d",
+        auto_adjust=False,
     )
 
+    if history is None or history.empty:
+        raise ValueError(f"No historical data found for {ticker_symbol}.")
 
-def bs_delta(
-    spot,
-    strike,
-    years,
-    risk_free,
-    iv,
-    option_side,
-):
-    """
-    Black-Scholes delta.
+    history = flatten_yfinance_columns(history)
 
-    Call = positive delta
-    Put  = negative delta
-    """
+    if "Close" not in history.columns:
+        raise ValueError("Yahoo Finance did not return a Close column.")
 
-    if (
-        spot <= 0
-        or strike <= 0
-        or years <= 0
-        or iv <= 0
-    ):
-        return None
+    close = history["Close"].dropna()
 
-    d1 = (
-        math.log(spot / strike)
-        + (
-            risk_free
-            + 0.5 * iv ** 2
-        ) * years
-    ) / (
-        iv * math.sqrt(years)
-    )
+    if close.empty:
+        raise ValueError("No closing-price data was returned.")
 
-    n_d1 = norm_cdf(d1)
+    previous_close = float(close.iloc[-1])
 
-    if option_side == "call":
-        return n_d1
+    # --------------------------------------------------------
+    # Current / latest available price
+    # --------------------------------------------------------
 
-    return n_d1 - 1
+    current_price = None
+    price_source = "Historical close fallback"
 
-
-def round_otm_strike(
-    value,
-    increment,
-    side,
-):
-    """
-    Round a strike further OTM.
-
-    Put:
-        floor
-
-    Call:
-        ceil
-    """
-
-    if increment <= 0:
-        return round(value, 2)
-
-    steps = value / increment
-
-    if side == "put":
-        steps = math.floor(steps)
-    else:
-        steps = math.ceil(steps)
-
-    return round(
-        steps * increment,
-        2,
-    )
-
-
-def get_next_earnings_date(ticker):
-    """
-    Best-effort Yahoo Finance earnings lookup.
-    """
-
+    # First attempt: fast_info
     try:
+        fast_info = ticker_obj.fast_info
 
-        tk = yf.Ticker(ticker)
+        if fast_info:
+            current_price = fast_info.get("last_price")
 
-        try:
-
-            earnings = tk.get_earnings_dates(
-                limit=8
-            )
-
-            if (
-                earnings is not None
-                and not earnings.empty
-            ):
-
-                today = pd.Timestamp(
-                    date.today()
-                )
-
-                index = earnings.index
-
-                if getattr(
-                    index,
-                    "tz",
-                    None,
-                ) is not None:
-
-                    index = index.tz_localize(
-                        None
-                    )
-
-                future = earnings.loc[
-                    index >= today
-                ]
-
-                if not future.empty:
-
-                    first = future.index[0]
-
-                    if getattr(
-                        first,
-                        "tz",
-                        None,
-                    ) is not None:
-
-                        first = first.tz_localize(
-                            None
-                        )
-
-                    return first.date()
-
-        except Exception:
-            pass
-
-        try:
-
-            calendar = tk.calendar
-
-            if isinstance(
-                calendar,
-                dict,
-            ):
-
-                dates = calendar.get(
-                    "Earnings Date"
-                )
-
-                if dates:
-                    return pd.Timestamp(
-                        dates[0]
-                    ).date()
-
-            elif hasattr(
-                calendar,
-                "loc",
-            ):
-
-                value = calendar.loc[
-                    "Earnings Date"
-                ].iloc[0]
-
-                return pd.Timestamp(
-                    value
-                ).date()
-
-        except Exception:
-            pass
-
+            if current_price is not None:
+                current_price = float(current_price)
+                price_source = "Yahoo Finance latest quote"
     except Exception:
         pass
 
-    return None
+    # Second attempt: info
+    if current_price is None:
+        try:
+            info = ticker_obj.info
+
+            current_price = (
+                info.get("currentPrice")
+                or info.get("regularMarketPrice")
+            )
+
+            if current_price is not None:
+                current_price = float(current_price)
+                price_source = "Yahoo Finance market price"
+        except Exception:
+            pass
+
+    # Final fallback
+    if current_price is None:
+        current_price = previous_close
+
+    return {
+        "ticker": ticker_symbol.upper(),
+        "history": history,
+        "current_price": current_price,
+        "previous_close": previous_close,
+        "price_source": price_source,
+    }
+
+
+def calculate_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
+
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
+
+
+def calculate_macd(series):
+    ema12 = series.ewm(span=12, adjust=False).mean()
+    ema26 = series.ewm(span=26, adjust=False).mean()
+
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+
+    return macd, signal
+
+
+def calculate_atr(history, period=14):
+    high = history["High"]
+    low = history["Low"]
+    close = history["Close"]
+
+    previous_close = close.shift(1)
+
+    tr1 = high - low
+    tr2 = (high - previous_close).abs()
+    tr3 = (low - previous_close).abs()
+
+    true_range = pd.concat(
+        [tr1, tr2, tr3],
+        axis=1,
+    ).max(axis=1)
+
+    atr = true_range.rolling(period).mean()
+
+    return atr
+
+
+def normal_cdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def calculate_option_delta(
+    stock_price,
+    strike,
+    volatility,
+    time_years,
+    risk_free_rate,
+    option_type="put",
+):
+    """
+    Black-Scholes delta approximation.
+
+    volatility = decimal
+    time_years = years
+    """
+
+    if stock_price <= 0:
+        return None
+
+    if strike <= 0:
+        return None
+
+    if volatility <= 0:
+        return None
+
+    if time_years <= 0:
+        return None
+
+    d1 = (
+        math.log(stock_price / strike)
+        + (
+            risk_free_rate
+            + 0.5 * volatility**2
+        ) * time_years
+    ) / (
+        volatility * math.sqrt(time_years)
+    )
+
+    if option_type.lower() == "call":
+        return normal_cdf(d1)
+
+    # Put delta
+    return normal_cdf(d1) - 1
+
+
+def estimate_expected_move(
+    price,
+    implied_volatility,
+    dte,
+):
+    """
+    Approximate expected move using:
+
+        Price × IV × sqrt(DTE / 365)
+    """
+
+    if implied_volatility <= 0:
+        return None
+
+    if dte <= 0:
+        return None
+
+    return price * implied_volatility * math.sqrt(dte / 365)
+
+
+def calculate_spread_metrics(
+    width,
+    credit,
+    contracts=1,
+):
+    """
+    Calculate vertical credit-spread risk.
+
+    Example:
+        $5-wide spread
+        $1.00 credit
+
+    Maximum loss:
+        ($5 - $1) × 100
+        = $400 per contract
+    """
+
+    max_loss_per_share = max(width - credit, 0)
+
+    max_loss_per_contract = (
+        max_loss_per_share
+        * CONTRACT_MULTIPLIER
+    )
+
+    max_profit_per_contract = (
+        credit
+        * CONTRACT_MULTIPLIER
+    )
+
+    total_max_loss = (
+        max_loss_per_contract
+        * contracts
+    )
+
+    total_max_profit = (
+        max_profit_per_contract
+        * contracts
+    )
+
+    return {
+        "max_loss_per_share": max_loss_per_share,
+        "max_loss_per_contract": max_loss_per_contract,
+        "max_profit_per_contract": max_profit_per_contract,
+        "total_max_loss": total_max_loss,
+        "total_max_profit": total_max_profit,
+    }
+
+
+def calculate_contracts(
+    account_size,
+    risk_percent,
+    width,
+    credit,
+):
+    """
+    Position sizing based on maximum possible loss.
+
+    Standard option contract multiplier = 100.
+    """
+
+    risk_budget = account_size * risk_percent
+
+    max_loss_per_contract = (
+        max(width - credit, 0)
+        * CONTRACT_MULTIPLIER
+    )
+
+    if max_loss_per_contract <= 0:
+        return 0, risk_budget, 0
+
+    contracts = math.floor(
+        risk_budget / max_loss_per_contract
+    )
+
+    return (
+        contracts,
+        risk_budget,
+        max_loss_per_contract,
+    )
+
+
+def distance_from_price(price, strike):
+    if price == 0:
+        return 0
+
+    return abs(price - strike) / price
+
+
+def calculate_atr_distance(price, strike, atr):
+    if atr is None or atr <= 0:
+        return None
+
+    return abs(price - strike) / atr
 
 
 # ============================================================
-# SECTION 0 — MARKET DATA
+# SIDEBAR
 # ============================================================
 
-st.header("0. Market Data")
+st.sidebar.title("⚙️ OTM Flex™")
 
-ticker = st.text_input(
+ticker_input = st.sidebar.text_input(
     "Ticker",
-    value="SPY",
-).strip().upper()
+    value=st.session_state["ticker"],
+).upper().strip()
+
+if ticker_input:
+    st.session_state["ticker"] = ticker_input
 
 
-if st.button(
-    "🔄 Fetch Price & Indicators"
+if st.sidebar.button(
+    "🔄 Refresh Market Data",
+    use_container_width=True,
+):
+    st.session_state["market_loaded"] = False
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("📊 OTM Flex™")
+
+st.subheader(
+    "Credit Spread Strike Selection Calculator"
+)
+
+st.write(
+    """
+    **Trend → Delta → Distance → Flex**
+
+    The calculator helps evaluate out-of-the-money
+    credit-spread candidates using trend, delta,
+    distance, ATR, expected move, credit and position
+    sizing.
+    """
+)
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+if (
+    not st.session_state["market_loaded"]
+    or st.session_state["ticker"] != ticker_input
 ):
 
     try:
-
-        history = (
-            yf.Ticker(ticker)
-            .history(
-                period="1y",
-                interval="1d",
-            )
+        data = get_market_data(
+            st.session_state["ticker"]
         )
 
-        if history.empty:
-
-            st.error(
-                "No price history returned. "
-                "Check the ticker."
-            )
-
-        else:
-
-            close = history["Close"]
-            high = history["High"]
-            low = history["Low"]
-
-            previous_close = close.shift(1)
-
-            # ------------------------
-            # PRICE
-            # ------------------------
-
-            st.session_state["price"] = round(
-                float(close.iloc[-1]),
-                2,
-            )
-
-            # ------------------------
-            # EMAs
-            # ------------------------
-
-            for span, key in [
-                (20, "ema20"),
-                (50, "ema50"),
-                (200, "ema200"),
-            ]:
-
-                value = (
-                    close
-                    .ewm(
-                        span=span,
-                        adjust=False,
-                    )
-                    .mean()
-                    .iloc[-1]
-                )
-
-                st.session_state[key] = round(
-                    float(value),
-                    2,
-                )
-
-            # ------------------------
-            # RSI
-            # ------------------------
-
-            change = close.diff()
-
-            gain = change.clip(
-                lower=0
-            )
-
-            loss = -change.clip(
-                upper=0
-            )
-
-            avg_gain = gain.ewm(
-                alpha=1 / 14,
-                adjust=False,
-            ).mean()
-
-            avg_loss = loss.ewm(
-                alpha=1 / 14,
-                adjust=False,
-            ).mean()
-
-            rs = avg_gain / avg_loss.replace(
-                0,
-                float("nan"),
-            )
-
-            rsi_series = (
-                100
-                - 100 / (1 + rs)
-            )
-
-            st.session_state["rsi"] = round(
-                float(rsi_series.iloc[-1]),
-                1,
-            )
-
-            # ------------------------
-            # MACD
-            # ------------------------
-
-            ema12 = close.ewm(
-                span=12,
-                adjust=False,
-            ).mean()
-
-            ema26 = close.ewm(
-                span=26,
-                adjust=False,
-            ).mean()
-
-            macd = ema12 - ema26
-
-            signal = macd.ewm(
-                span=9,
-                adjust=False,
-            ).mean()
-
-            st.session_state[
-                "macd_line"
-            ] = round(
-                float(macd.iloc[-1]),
-                2,
-            )
-
-            st.session_state[
-                "macd_signal"
-            ] = round(
-                float(signal.iloc[-1]),
-                2,
-            )
-
-            # ------------------------
-            # ATR
-            # ------------------------
-
-            true_range = pd.concat(
-                [
-                    high - low,
-                    (
-                        high
-                        - previous_close
-                    ).abs(),
-                    (
-                        low
-                        - previous_close
-                    ).abs(),
-                ],
-                axis=1,
-            ).max(axis=1)
-
-            atr = true_range.ewm(
-                alpha=1 / 14,
-                adjust=False,
-            ).mean()
-
-            st.session_state["atr"] = round(
-                float(atr.iloc[-1]),
-                2,
-            )
-
-            # ------------------------
-            # EARNINGS
-            # ------------------------
-
-            earnings = (
-                get_next_earnings_date(
-                    ticker
-                )
-            )
-
-            if earnings:
-
-                st.session_state[
-                    "next_earnings_date"
-                ] = earnings.isoformat()
-
-            else:
-
-                st.session_state[
-                    "next_earnings_date"
-                ] = None
-
-            # Clear old option data
-
-            st.session_state[
-                "expirations"
-            ] = []
-
-            st.session_state[
-                "chain_df"
-            ] = None
-
-            st.session_state[
-                "atm_iv"
-            ] = 20.0
-
-            st.session_state[
-                "chain_version"
-            ] += 1
-
-            st.session_state[
-                "data_fetched_at"
-            ] = datetime.now().strftime(
-                "%Y-%m-%d %H:%M"
-            )
-
-            st.success(
-                f"Fetched {ticker} — "
-                f"latest bar "
-                f"{history.index[-1].date()}"
-            )
-
-    except Exception as exc:
-
-        st.error(
-            f"Fetch failed: {exc}"
-        )
-
-
-if st.session_state[
-    "data_fetched_at"
-]:
-
-    st.caption(
-        "Last fetched: "
-        + st.session_state[
-            "data_fetched_at"
+        st.session_state["history"] = data["history"]
+        st.session_state["price"] = data["current_price"]
+        st.session_state["previous_close"] = data[
+            "previous_close"
         ]
+        st.session_state["price_source"] = data[
+            "price_source"
+        ]
+
+        st.session_state["market_loaded"] = True
+        st.session_state["market_error"] = None
+
+    except Exception as e:
+
+        st.session_state["market_loaded"] = False
+        st.session_state["market_error"] = str(e)
+
+
+if st.session_state["market_error"]:
+
+    st.error(
+        f"Unable to load market data: "
+        f"{st.session_state['market_error']}"
     )
 
-    earnings = st.session_state[
-        "next_earnings_date"
-    ]
-
-    if earnings:
-
-        st.caption(
-            f"Approx. next earnings: "
-            f"{earnings}"
-        )
+    st.stop()
 
 
 # ============================================================
-# SECTION 1 — TREND
+# VARIABLES
 # ============================================================
 
-st.header("1. Trend")
+ticker = st.session_state["ticker"]
 
-col1, col2, col3 = st.columns(3)
+history = st.session_state["history"]
+
+current_price = st.session_state["price"]
+
+previous_close = st.session_state["previous_close"]
+
+close = history["Close"].dropna()
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+ema20 = calculate_ema(close, 20)
+ema50 = calculate_ema(close, 50)
+ema200 = calculate_ema(close, 200)
+
+rsi = calculate_rsi(close)
+
+macd, macd_signal = calculate_macd(close)
+
+atr = calculate_atr(history)
+
+
+current_ema20 = float(ema20.iloc[-1])
+current_ema50 = float(ema50.iloc[-1])
+current_ema200 = float(ema200.iloc[-1])
+
+current_rsi = float(rsi.iloc[-1])
+
+current_macd = float(macd.iloc[-1])
+current_macd_signal = float(
+    macd_signal.iloc[-1]
+)
+
+current_atr = float(atr.iloc[-1])
+
+
+# ============================================================
+# MARKET SNAPSHOT
+# ============================================================
+
+st.header("1️⃣ Market Snapshot")
+
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-
-    price = st.number_input(
-        "Current price",
-        min_value=0.01,
-        value=float(
-            st.session_state[
-                "price"
-            ]
-        ),
-        step=0.01,
-        format="%.2f",
-        key="price_input",
+    st.metric(
+        "Current / Last Price",
+        f"${current_price:,.2f}",
     )
 
 with col2:
-
-    ema20 = st.number_input(
-        "EMA20",
-        min_value=0.01,
-        value=float(
-            st.session_state[
-                "ema20"
-            ]
-        ),
-        step=0.01,
-        format="%.2f",
-        key="ema20_input",
+    st.metric(
+        "Previous Close",
+        f"${previous_close:,.2f}",
     )
 
 with col3:
+    change = current_price - previous_close
 
-    ema50 = st.number_input(
-        "EMA50",
-        min_value=0.01,
-        value=float(
-            st.session_state[
-                "ema50"
-            ]
-        ),
-        step=0.01,
-        format="%.2f",
-        key="ema50_input",
+    st.metric(
+        "Change",
+        f"${change:,.2f}",
     )
-
-
-ema200 = st.number_input(
-    "EMA200",
-    min_value=0.01,
-    value=float(
-        st.session_state[
-            "ema200"
-        ]
-    ),
-    step=0.01,
-    format="%.2f",
-    key="ema200_input",
-)
-
-
-# ============================================================
-# DIRECTION
-# ============================================================
-
-if price > ema20:
-
-    direction = "Bull Put Spread"
-    side = "put"
-    option_type = "PUT"
-
-    st.success(
-        f"Price ${price:.2f} > EMA20 "
-        f"${ema20:.2f} → "
-        f"**BULL PUT SPREAD**"
-    )
-
-elif price < ema20:
-
-    direction = "Bear Call Spread"
-    side = "call"
-    option_type = "CALL"
-
-    st.error(
-        f"Price ${price:.2f} < EMA20 "
-        f"${ema20:.2f} → "
-        f"**BEAR CALL SPREAD**"
-    )
-
-else:
-
-    direction = None
-    side = None
-    option_type = None
-
-    st.warning(
-        "Price equals EMA20. "
-        "There is no clear directional signal."
-    )
-
-
-# ============================================================
-# MOMENTUM CONTEXT
-# ============================================================
-
-st.subheader(
-    "Momentum Context"
-)
-
-st.caption(
-    "RSI and MACD help describe trend strength. "
-    "They do NOT automatically reject the trade."
-)
-
-col4, col5, col6 = st.columns(3)
 
 with col4:
+    change_pct = (
+        (current_price / previous_close) - 1
+    ) * 100
 
-    rsi = st.number_input(
-        "RSI (14)",
-        min_value=0.0,
-        max_value=100.0,
-        value=float(
-            st.session_state["rsi"]
-        ),
-        step=0.5,
+    st.metric(
+        "Change %",
+        f"{change_pct:+.2f}%",
     )
 
-with col5:
-
-    macd_line = st.number_input(
-        "MACD line",
-        value=float(
-            st.session_state[
-                "macd_line"
-            ]
-        ),
-        step=0.01,
-        format="%.2f",
-    )
-
-with col6:
-
-    macd_signal = st.number_input(
-        "MACD signal",
-        value=float(
-            st.session_state[
-                "macd_signal"
-            ]
-        ),
-        step=0.01,
-        format="%.2f",
-    )
-
-
-macd_histogram = (
-    macd_line
-    - macd_signal
-)
-
-
-# ============================================================
-# TREND STRENGTH
-# ============================================================
-
-def trend_strength_score(
-    side,
-    price,
-    ema20,
-    ema50,
-    ema200,
-    rsi,
-    macd_line,
-    macd_signal,
-):
-
-    score = 0
-
-    notes = []
-
-    # ------------------------
-    # EMA
-    # ------------------------
-
-    if side == "put":
-
-        if ema20 > ema50 > ema200:
-
-            score += 2
-            notes.append(
-                "Strong bullish EMA stack"
-            )
-
-        elif ema20 > ema50:
-
-            score += 1
-            notes.append(
-                "Partial bullish EMA stack"
-            )
-
-        else:
-
-            notes.append(
-                "EMA stack not bullish"
-            )
-
-    elif side == "call":
-
-        if ema20 < ema50 < ema200:
-
-            score += 2
-            notes.append(
-                "Strong bearish EMA stack"
-            )
-
-        elif ema20 < ema50:
-
-            score += 1
-            notes.append(
-                "Partial bearish EMA stack"
-            )
-
-        else:
-
-            notes.append(
-                "EMA stack not bearish"
-            )
-
-    # ------------------------
-    # RSI
-    # ------------------------
-
-    if side == "put":
-
-        if 50 <= rsi <= 70:
-
-            score += 2
-            notes.append(
-                "RSI supports bullish trend"
-            )
-
-        elif 40 <= rsi <= 80:
-
-            score += 1
-            notes.append(
-                "RSI is neutral/borderline"
-            )
-
-        else:
-
-            notes.append(
-                "RSI is weak/extended"
-            )
-
-    elif side == "call":
-
-        if 30 <= rsi <= 50:
-
-            score += 2
-            notes.append(
-                "RSI supports bearish trend"
-            )
-
-        elif 20 <= rsi <= 60:
-
-            score += 1
-            notes.append(
-                "RSI is neutral/borderline"
-            )
-
-        else:
-
-            notes.append(
-                "RSI is weak/extended"
-            )
-
-    # ------------------------
-    # MACD
-    # ------------------------
-
-    if side == "put":
-
-        if macd_line > macd_signal:
-
-            score += 2
-            notes.append(
-                "MACD bullish"
-            )
-
-        else:
-
-            score += 0
-            notes.append(
-                "MACD bearish"
-            )
-
-    elif side == "call":
-
-        if macd_line < macd_signal:
-
-            score += 2
-            notes.append(
-                "MACD bearish"
-            )
-
-        else:
-
-            score += 0
-            notes.append(
-                "MACD bullish"
-            )
-
-    return score, notes
-
-
-score, trend_notes = trend_strength_score(
-    side,
-    price,
-    ema20,
-    ema50,
-    ema200,
-    rsi,
-    macd_line,
-    macd_signal,
-)
-
-
-if score >= 5:
-
-    trend_strength = "Strong"
-
-elif score >= 3:
-
-    trend_strength = "Average"
-
-else:
-
-    trend_strength = "Choppy / Uncertain"
-
-
-st.metric(
-    "Trend Strength",
-    trend_strength,
-    f"{score}/6",
-)
-
-with st.expander(
-    "Trend context"
-):
-
-    for note in trend_notes:
-
-        st.write(
-            f"• {note}"
-        )
-
-
-# ============================================================
-# SECTION 2 — ATR
-# ============================================================
-
-st.header(
-    "2. Distance — ATR Reality Check"
-)
-
-col_atr, col_increment = st.columns(2)
-
-with col_atr:
-
-    atr = st.number_input(
-        "ATR (14-day)",
-        min_value=0.01,
-        value=float(
-            st.session_state["atr"]
-        ),
-        step=0.01,
-        format="%.2f",
-    )
-
-with col_increment:
-
-    strike_increment = st.number_input(
-        "Strike increment ($)",
-        min_value=0.01,
-        value=1.0,
-        step=0.5,
-    )
-
-
-if trend_strength == "Strong":
-
-    low_atr = 1.0
-    high_atr = 2.0
-
-elif trend_strength == "Average":
-
-    low_atr = 2.0
-    high_atr = 2.0
-
-else:
-
-    low_atr = 2.0
-    high_atr = 3.0
-
-
-st.info(
-    f"OTM Flex ATR guideline: "
-    f"**{low_atr:.1f}–{high_atr:.1f} ATR** "
-    f"for a {trend_strength.lower()} trend."
-)
-
-
-# ============================================================
-# ATR LADDER
-# ============================================================
-
-atr_ladder = []
-
-if side:
-
-    for multiplier in [
-        1.0,
-        1.5,
-        2.0,
-        2.5,
-        3.0,
-    ]:
-
-        if side == "put":
-
-            strike = round_otm_strike(
-                price - atr * multiplier,
-                strike_increment,
-                "put",
-            )
-
-            distance = (
-                price - strike
-            )
-
-        else:
-
-            strike = round_otm_strike(
-                price + atr * multiplier,
-                strike_increment,
-                "call",
-            )
-
-            distance = (
-                strike - price
-            )
-
-        actual_atr = (
-            distance / atr
-            if atr > 0
-            else 0
-        )
-
-        within = (
-            low_atr
-            <= actual_atr
-            <= high_atr
-        )
-
-        atr_ladder.append(
-            {
-                "Target ATR":
-                    f"{multiplier:.1f}x",
-
-                "Strike":
-                    strike,
-
-                "Distance":
-                    round(
-                        distance,
-                        2,
-                    ),
-
-                "Actual ATR":
-                    round(
-                        actual_atr,
-                        2,
-                    ),
-
-                "Guideline":
-                    "✅"
-                    if within
-                    else "",
-            }
-        )
-
-
-if atr_ladder:
-
-    st.dataframe(
-        pd.DataFrame(
-            atr_ladder
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-# ============================================================
-# SECTION 3 — OPTION CHAIN
-# ============================================================
-
-st.header(
-    "3. Strike Selection — "
-    "Delta → Distance → Flex"
-)
-
-if side:
-
-    st.caption(
-        "The option chain identifies the "
-        "0.10–0.18 delta starting point. "
-        "The Flex ladder then moves farther OTM."
-    )
-
-    risk_free_pct = st.number_input(
-        "Risk-free rate (%)",
-        min_value=0.0,
-        max_value=15.0,
-        value=4.30,
-        step=0.05,
-    )
-
-    risk_free = (
-        risk_free_pct / 100
-    )
-
-
-    # ========================================================
-    # LOAD EXPIRATIONS
-    # ========================================================
-
-    if st.button(
-        "📅 Load Expirations"
-    ):
-
-        try:
-
-            st.session_state[
-                "expirations"
-            ] = list(
-                yf.Ticker(
-                    ticker
-                ).options
-            )
-
-        except Exception as exc:
-
-            st.error(
-                f"Could not load expirations: "
-                f"{exc}"
-            )
-
-
-    expirations = st.session_state[
-        "expirations"
-    ]
-
-
-    if expirations:
-
-        today = date.today()
-
-        expiration_labels = []
-
-        for expiration in expirations:
-
-            try:
-
-                dte = (
-                    date.fromisoformat(
-                        expiration
-                    )
-                    - today
-                ).days
-
-                expiration_labels.append(
-                    f"{expiration} "
-                    f"({dte} DTE)"
-                )
-
-            except ValueError:
-
-                expiration_labels.append(
-                    expiration
-                )
-
-
-        selected_label = st.selectbox(
-            "Expiration",
-            expiration_labels,
-        )
-
-        selected_expiration = expirations[
-            expiration_labels.index(
-                selected_label
-            )
-        ]
-
-
-        if st.button(
-            "📊 Fetch Option Chain"
-        ):
-
-            try:
-
-                chain = (
-                    yf.Ticker(
-                        ticker
-                    ).option_chain(
-                        selected_expiration
-                    )
-                )
-
-                chain_data = (
-                    chain.puts
-                    if side == "put"
-                    else chain.calls
-                )
-
-
-                expiration_date = (
-                    date.fromisoformat(
-                        selected_expiration
-                    )
-                )
-
-                days_to_expiration = (
-                    expiration_date
-                    - today
-                ).days
-
-                years = (
-                    max(
-                        days_to_expiration,
-                        0,
-                    )
-                    / 365
-                )
-
-
-                # ------------------------------------------
-                # ATM IV
-                # ------------------------------------------
-
-                if not chain_data.empty:
-
-                    nearest_index = (
-                        (
-                            chain_data[
-                                "strike"
-                            ]
-                            - price
-                        )
-                        .abs()
-                        .argsort()
-                        .iloc[0]
-                    )
-
-                    atm_row = chain_data.iloc[
-                        nearest_index
-                    ]
-
-                    atm_iv = atm_row.get(
-                        "impliedVolatility"
-                    )
-
-                    if (
-                        atm_iv
-                        and atm_iv > 0
-                    ):
-
-                        st.session_state[
-                            "atm_iv"
-                        ] = round(
-                            float(atm_iv)
-                            * 100,
-                            1,
-                        )
-
-                        st.session_state[
-                            "atm_iv_dte"
-                        ] = (
-                            days_to_expiration
-                        )
-
-
-                # ------------------------------------------
-                # BUILD CHAIN TABLE
-                # ------------------------------------------
-
-                rows = []
-
-                for _, row in chain_data.iterrows():
-
-                    strike = row.get(
-                        "strike"
-                    )
-
-                    iv = row.get(
-                        "impliedVolatility"
-                    )
-
-                    if (
-                        strike is None
-                        or iv is None
-                        or iv <= 0
-                        or years <= 0
-                    ):
-                        continue
-
-
-                    # Only OTM strikes
-
-                    if (
-                        side == "put"
-                        and strike >= price
-                    ):
-                        continue
-
-                    if (
-                        side == "call"
-                        and strike <= price
-                    ):
-                        continue
-
-
-                    delta = bs_delta(
-                        price,
-                        strike,
-                        years,
-                        risk_free,
-                        iv,
-                        side,
-                    )
-
-                    if delta is None:
-                        continue
-
-
-                    abs_delta = abs(
-                        delta
-                    )
-
-
-                    # Keep a wider range
-                    # to show Flex strikes.
-
-                    if (
-                        abs_delta < 0.03
-                        or abs_delta > 0.40
-                    ):
-                        continue
-
-
-                    bid = float(
-                        row.get(
-                            "bid"
-                        )
-                        or 0
-                    )
-
-                    ask = float(
-                        row.get(
-                            "ask"
-                        )
-                        or 0
-                    )
-
-                    mid = (
-                        (bid + ask) / 2
-                        if bid > 0
-                        and ask > 0
-                        else 0
-                    )
-
-
-                    spread = (
-                        ask - bid
-                        if ask > 0
-                        and bid > 0
-                        else 0
-                    )
-
-
-                    rows.append(
-                        {
-                            "Strike":
-                                round(
-                                    float(
-                                        strike
-                                    ),
-                                    2,
-                                ),
-
-                            "Delta":
-                                round(
-                                    abs_delta,
-                                    2,
-                                ),
-
-                            "IV %":
-                                round(
-                                    float(iv)
-                                    * 100,
-                                    1,
-                                ),
-
-                            "Bid":
-                                round(
-                                    bid,
-                                    2,
-                                ),
-
-                            "Ask":
-                                round(
-                                    ask,
-                                    2,
-                                ),
-
-                            "Mid":
-                                round(
-                                    mid,
-                                    2,
-                                ),
-
-                            "Bid/Ask Width":
-                                round(
-                                    spread,
-                                    2,
-                                ),
-                        }
-                    )
-
-
-                if rows:
-
-                    chain_df = pd.DataFrame(
-                        rows
-                    )
-
-                    chain_df = chain_df.sort_values(
-                        "Strike",
-                        ascending=(
-                            side == "call"
-                        ),
-                    ).reset_index(
-                        drop=True
-                    )
-
-                    st.session_state[
-                        "chain_df"
-                    ] = chain_df
-
-                    st.session_state[
-                        "chain_version"
-                    ] += 1
-
-                    st.success(
-                        f"Loaded "
-                        f"{len(chain_df)} "
-                        f"OTM strikes."
-                    )
-
-                else:
-
-                    st.warning(
-                        "No usable OTM strikes "
-                        "were found."
-                    )
-
-            except Exception as exc:
-
-                st.error(
-                    f"Option chain fetch failed: "
-                    f"{exc}"
-                )
-
-    else:
-
-        st.caption(
-            "Click Load Expirations first."
-        )
-
-
-# ============================================================
-# MANUAL CHAIN
-# ============================================================
-
-chain_df = st.session_state[
-    "chain_df"
-]
-
-
-if chain_df is None:
-
-    manual_strikes = []
-
-    for multiplier in [
-        1.0,
-        1.5,
-        2.0,
-        2.5,
-        3.0,
-    ]:
-
-        if side == "put":
-
-            strike = round_otm_strike(
-                price - atr * multiplier,
-                strike_increment,
-                "put",
-            )
-
-        else:
-
-            strike = round_otm_strike(
-                price + atr * multiplier,
-                strike_increment,
-                "call",
-            )
-
-        manual_strikes.append(
-            strike
-        )
-
-
-    chain_df = pd.DataFrame(
-        {
-            "Strike":
-                manual_strikes,
-
-            "Delta":
-                [
-                    0.22,
-                    0.18,
-                    0.14,
-                    0.11,
-                    0.08,
-                ],
-
-            "Bid":
-                [0.0] * 5,
-
-            "Ask":
-                [0.0] * 5,
-
-            "Mid":
-                [0.0] * 5,
-        }
-    )
-
-
-edited_chain = st.data_editor(
-    chain_df,
-    num_rows="dynamic",
-    use_container_width=True,
-    key=(
-        "chain_editor_"
-        + str(
-            st.session_state[
-                "chain_version"
-            ]
-        )
-    ),
-    column_config={
-        "Strike":
-            st.column_config.NumberColumn(
-                format="%.2f",
-                min_value=0.01,
-                step=0.50,
-            ),
-
-        "Delta":
-            st.column_config.NumberColumn(
-                format="%.2f",
-                min_value=0.0,
-                max_value=1.0,
-                step=0.01,
-            ),
-
-        "Bid":
-            st.column_config.NumberColumn(
-                format="$%.2f",
-                min_value=0.0,
-                step=0.01,
-            ),
-
-        "Ask":
-            st.column_config.NumberColumn(
-                format="$%.2f",
-                min_value=0.0,
-                step=0.01,
-            ),
-
-        "Mid":
-            st.column_config.NumberColumn(
-                format="$%.2f",
-                min_value=0.0,
-                step=0.01,
-            ),
-    },
-)
-
-
-# ============================================================
-# CANDIDATE ANALYSIS
-# ============================================================
-
-if side and not edited_chain.empty:
-
-    candidates = []
-
-    for _, row in edited_chain.iterrows():
-
-        try:
-
-            strike = float(
-                row["Strike"]
-            )
-
-            delta = float(
-                row["Delta"]
-            )
-
-        except (
-            ValueError,
-            TypeError,
-        ):
-
-            continue
-
-
-        # --------------------------------------
-        # Ensure OTM
-        # --------------------------------------
-
-        if side == "put":
-
-            if strike >= price:
-                continue
-
-            distance = (
-                price - strike
-            )
-
-        else:
-
-            if strike <= price:
-                continue
-
-            distance = (
-                strike - price
-            )
-
-
-        atr_multiple = (
-            distance / atr
-            if atr > 0
-            else 0
-        )
-
-
-        delta_target = (
-            0.10
-            <= delta
-            <= 0.18
-        )
-
-
-        distance_target = (
-            low_atr
-            <= atr_multiple
-            <= high_atr
-        )
-
-
-        # --------------------------------------
-        # Credit
-        # --------------------------------------
-
-        mid = float(
-            row.get(
-                "Mid",
-                0,
-            )
-            or 0
-        )
-
-
-        bid = float(
-            row.get(
-                "Bid",
-                0,
-            )
-            or 0
-        )
-
-
-        ask = float(
-            row.get(
-                "Ask",
-                0,
-            )
-            or 0
-        )
-
-
-        # --------------------------------------
-        # FLEX CATEGORY
-        # --------------------------------------
-
-        if delta_target:
-
-            if distance_target:
-
-                status = (
-                    "⭐ Preferred"
-                )
-
-            else:
-
-                status = (
-                    "🟢 Delta OK — "
-                    "check distance"
-                )
-
-        elif delta > 0.18:
-
-            status = (
-                "🟡 Move further OTM"
-            )
-
-        elif delta < 0.10:
-
-            status = (
-                "⚪ More conservative"
-            )
-
-        else:
-
-            status = (
-                "⚪ Review"
-            )
-
-
-        candidates.append(
-            {
-                "Strike":
-                    strike,
-
-                "Delta":
-                    delta,
-
-                "Distance":
-                    round(
-                        distance,
-                        2,
-                    ),
-
-                "ATR":
-                    round(
-                        atr_multiple,
-                        2,
-                    ),
-
-                "Delta 0.10–0.18":
-                    "✅"
-                    if delta_target
-                    else "",
-
-                "ATR Guideline":
-                    "✅"
-                    if distance_target
-                    else "",
-
-                "Mid Credit":
-                    round(
-                        mid,
-                        2,
-                    ),
-
-                "Status":
-                    status,
-            }
-        )
-
-
-    candidate_df = pd.DataFrame(
-        candidates
-    )
-
-
-    st.subheader(
-        "OTM Flex Candidate Ladder"
-    )
-
-    st.dataframe(
-        candidate_df,
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-    # ========================================================
-    # GOLDEN RULE SELECTION
-    # ========================================================
-
-    preferred = candidate_df[
-        (
-            candidate_df[
-                "Delta 0.10–0.18"
-            ]
-            == "✅"
-        )
-        &
-        (
-            candidate_df[
-                "ATR Guideline"
-            ]
-            == "✅"
-        )
-    ]
-
-
-    if not preferred.empty:
-
-        if side == "put":
-
-            best_index = preferred[
-                "Strike"
-            ].idxmax()
-
-        else:
-
-            best_index = preferred[
-                "Strike"
-            ].idxmin()
-
-
-        best = preferred.loc[
-            best_index
-        ]
-
-
-        st.success(
-            f"⭐ **OTM Flex Starting Strike: "
-            f"{best['Strike']:.2f}**"
-        )
-
-        st.write(
-            f"Delta: **{best['Delta']:.2f}**  |  "
-            f"Distance: **${best['Distance']:.2f}**  |  "
-            f"ATR: **{best['ATR']:.2f}x**"
-        )
-
-        st.caption(
-            "This is the closest strike that "
-            "satisfies both the preferred "
-            "delta range and ATR guideline."
-        )
-
-    else:
-
-        st.warning(
-            "No strike currently satisfies "
-            "both the preferred delta and "
-            "ATR guideline."
-        )
-
-        st.info(
-            "OTM Flex does NOT automatically "
-            "mean 'no trade.' Review the ladder "
-            "and move further OTM if needed."
-        )
-
-
-    # ========================================================
-    # FLEX LADDER
-    # ========================================================
-
-    st.subheader(
-        "🔄 Flex Ladder"
-    )
-
-    st.caption(
-        "If the starting strike feels too risky, "
-        "move down for puts or up for calls."
-    )
-
-
-    sorted_candidates = candidate_df.copy()
-
-
-    if side == "put":
-
-        sorted_candidates = (
-            sorted_candidates
-            .sort_values(
-                "Strike",
-                ascending=False,
-            )
-        )
-
-    else:
-
-        sorted_candidates = (
-            sorted_candidates
-            .sort_values(
-                "Strike",
-                ascending=True,
-            )
-        )
-
-
-    flex_rows = []
-
-    for position, (_, row) in enumerate(
-        sorted_candidates.iterrows()
-    ):
-
-        if position == 0:
-
-            flex_action = (
-                "Starting point"
-            )
-
-        else:
-
-            flex_action = (
-                f"Flex #{position} — "
-                "further OTM"
-            )
-
-        flex_rows.append(
-            {
-                "Step":
-                    position,
-
-                "Strike":
-                    row["Strike"],
-
-                "Delta":
-                    row["Delta"],
-
-                "ATR":
-                    row["ATR"],
-
-                "Credit":
-                    row["Mid Credit"],
-
-                "Action":
-                    flex_action,
-            }
-        )
-
-
-    st.dataframe(
-        pd.DataFrame(
-            flex_rows
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-# ============================================================
-# SECTION 4 — EXPIRATION
-# ============================================================
-
-st.header(
-    "4. Expiration"
-)
-
-dte = st.slider(
-    "Days to expiration",
-    min_value=1,
-    max_value=60,
-    value=21,
-)
-
-
-if 7 <= dte <= 45:
-
-    st.success(
-        f"{dte} DTE is inside the "
-        f"OTM Flex 7–45 DTE range."
-    )
-
-else:
-
-    st.warning(
-        f"{dte} DTE is outside the "
-        f"typical 7–45 DTE range."
-    )
-
-
-expiration_estimate = (
-    date.today()
-    + timedelta(days=dte)
-)
-
-
-# ============================================================
-# EARNINGS
-# ============================================================
-
-st.subheader(
-    "📅 Earnings Check"
-)
-
-earnings_string = st.session_state[
-    "next_earnings_date"
-]
-
-
-if earnings_string:
-
-    earnings_date = date.fromisoformat(
-        earnings_string
-    )
-
-    st.write(
-        f"Next approximate earnings: "
-        f"**{earnings_date}**"
-    )
-
-    st.write(
-        f"Estimated expiration: "
-        f"**{expiration_estimate}**"
-    )
-
-
-    if (
-        date.today()
-        <= earnings_date
-        <= expiration_estimate
-    ):
-
-        st.error(
-            "⚠️ Earnings occur before "
-            "this expiration. "
-            "OTM Flex Rule 11: avoid "
-            "holding the stock spread "
-            "through earnings."
-        )
-
-    else:
-
-        st.success(
-            "No earnings date falls "
-            "inside this expiration window."
-        )
-
-else:
-
-    st.warning(
-        "Earnings date unavailable. "
-        "Verify your broker's earnings calendar."
-    )
-
-
-# ============================================================
-# SECTION 5 — EXPECTED MOVE
-# ============================================================
-
-st.header(
-    "5. Expected Move — IV Reality Check"
-)
 
 st.caption(
-    "Expected move is another reality check. "
-    "It does not replace ATR or Delta."
+    f"Price source: {st.session_state.get('price_source', 'Unknown')}"
 )
 
 
-atm_iv = st.number_input(
-    "ATM implied volatility (%)",
-    min_value=0.1,
-    max_value=300.0,
-    value=float(
-        st.session_state[
-            "atm_iv"
-        ]
-    ),
-    step=0.5,
-)
+# ============================================================
+# TREND
+# ============================================================
 
+st.header("2️⃣ Trend")
 
-expected_move = (
-    price
-    * (atm_iv / 100)
-    * math.sqrt(
-        dte / 365
+trend_col1, trend_col2, trend_col3 = st.columns(3)
+
+with trend_col1:
+
+    st.metric(
+        "EMA 20",
+        f"${current_ema20:,.2f}",
     )
+
+with trend_col2:
+
+    st.metric(
+        "EMA 50",
+        f"${current_ema50:,.2f}",
+    )
+
+with trend_col3:
+
+    st.metric(
+        "EMA 200",
+        f"${current_ema200:,.2f}",
+    )
+
+
+if current_price > current_ema20:
+
+    trend_direction = "Bullish / Bull-Put Bias"
+
+    st.success(
+        "Price is above EMA20 → bullish trend context."
+    )
+
+else:
+
+    trend_direction = "Bearish / Bear-Call Bias"
+
+    st.warning(
+        "Price is below EMA20 → bearish trend context."
+    )
+
+
+# ============================================================
+# MOMENTUM
+# ============================================================
+
+st.header("3️⃣ Momentum Context")
+
+mom1, mom2, mom3, mom4 = st.columns(4)
+
+with mom1:
+
+    st.metric(
+        "RSI",
+        f"{current_rsi:.1f}",
+    )
+
+with mom2:
+
+    st.metric(
+        "MACD",
+        f"{current_macd:.3f}",
+    )
+
+with mom3:
+
+    st.metric(
+        "MACD Signal",
+        f"{current_macd_signal:.3f}",
+    )
+
+with mom4:
+
+    st.metric(
+        "ATR(14)",
+        f"${current_atr:.2f}",
+    )
+
+
+if current_rsi > 50:
+
+    st.info(
+        "RSI is above 50, providing positive momentum context."
+    )
+
+else:
+
+    st.info(
+        "RSI is below 50, providing negative momentum context."
+    )
+
+
+# ============================================================
+# TRADE SETUP
+# ============================================================
+
+st.header("4️⃣ Trade Setup")
+
+setup_col1, setup_col2 = st.columns(2)
+
+with setup_col1:
+
+    if "Bull-Put" in trend_direction:
+
+        spread_type = st.selectbox(
+            "Spread Type",
+            [
+                "Bull Put Credit Spread",
+                "Bear Call Credit Spread",
+            ],
+            index=0,
+        )
+
+    else:
+
+        spread_type = st.selectbox(
+            "Spread Type",
+            [
+                "Bear Call Credit Spread",
+                "Bull Put Credit Spread",
+            ],
+            index=0,
+        )
+
+
+with setup_col2:
+
+    dte = st.number_input(
+        "Days to Expiration",
+        min_value=1,
+        max_value=365,
+        value=30,
+        step=1,
+    )
+
+
+# ============================================================
+# STRIKE INPUTS
+# ============================================================
+
+st.header("5️⃣ Strike Selection")
+
+strike_col1, strike_col2, strike_col3 = st.columns(3)
+
+with strike_col1:
+
+    preferred_delta_low = st.number_input(
+        "Preferred Delta Low",
+        min_value=0.01,
+        max_value=0.50,
+        value=0.10,
+        step=0.01,
+    )
+
+with strike_col2:
+
+    preferred_delta_high = st.number_input(
+        "Preferred Delta High",
+        min_value=0.01,
+        max_value=0.50,
+        value=0.18,
+        step=0.01,
+    )
+
+with strike_col3:
+
+    spread_width = st.number_input(
+        "Spread Width ($)",
+        min_value=0.50,
+        max_value=100.00,
+        value=5.00,
+        step=0.50,
+    )
+
+
+# ============================================================
+# VOLATILITY
+# ============================================================
+
+st.header("6️⃣ Volatility")
+
+vol_col1, vol_col2 = st.columns(2)
+
+with vol_col1:
+
+    implied_volatility_pct = st.number_input(
+        "Implied Volatility (%)",
+        min_value=1.0,
+        max_value=300.0,
+        value=20.0,
+        step=1.0,
+    )
+
+    implied_volatility = (
+        implied_volatility_pct / 100
+    )
+
+
+with vol_col2:
+
+    risk_free_rate_pct = st.number_input(
+        "Risk-Free Rate (%)",
+        min_value=0.0,
+        max_value=20.0,
+        value=4.0,
+        step=0.25,
+    )
+
+    risk_free_rate = (
+        risk_free_rate_pct / 100
+    )
+
+
+# ============================================================
+# EXPECTED MOVE
+# ============================================================
+
+expected_move = estimate_expected_move(
+    current_price,
+    implied_volatility,
+    dte,
+)
+
+upper_expected_move = (
+    current_price + expected_move
+)
+
+lower_expected_move = (
+    current_price - expected_move
 )
 
 
-expected_atr = (
-    expected_move / atr
-    if atr > 0
-    else 0
-)
+st.subheader("Expected Move")
 
+em1, em2, em3 = st.columns(3)
 
-col_em1, col_em2 = st.columns(2)
-
-with col_em1:
+with em1:
 
     st.metric(
         "Expected Move",
-        f"±${expected_move:.2f}",
+        f"±${expected_move:,.2f}",
     )
 
-with col_em2:
+with em2:
 
     st.metric(
-        "Expected Move / ATR",
-        f"{expected_atr:.2f}x",
+        "Lower Reference",
+        f"${lower_expected_move:,.2f}",
+    )
+
+with em3:
+
+    st.metric(
+        "Upper Reference",
+        f"${upper_expected_move:,.2f}",
     )
 
 
 st.caption(
-    "If the expected move is substantially "
-    "larger than the distance to your short "
-    "strike, consider using the Flex rule "
-    "and moving further OTM."
+    "Expected move is an estimate based on price, IV and DTE. "
+    "It is not a guaranteed trading range."
 )
 
 
 # ============================================================
-# SECTION 6 — CREDIT
+# MANUAL STRIKE ANALYSIS
 # ============================================================
 
-st.header(
-    "6. Credit & Profit Target"
+st.header("7️⃣ Candidate Strike")
+
+candidate_strike = st.number_input(
+    "Short Strike",
+    min_value=0.01,
+    value=float(
+        round(
+            current_price * 0.95
+            if "Bull Put" in spread_type
+            else current_price * 1.05,
+            2,
+        )
+    ),
+    step=0.50,
 )
 
-col_credit, col_width = st.columns(2)
 
-with col_credit:
+# ============================================================
+# DELTA ESTIMATION
+# ============================================================
 
-    credit = st.number_input(
-        "Credit received ($/spread)",
-        min_value=0.0,
-        value=1.00,
-        step=0.01,
-        format="%.2f",
+time_years = dte / 365
+
+if "Bull Put" in spread_type:
+
+    estimated_delta = calculate_option_delta(
+        stock_price=current_price,
+        strike=candidate_strike,
+        volatility=implied_volatility,
+        time_years=time_years,
+        risk_free_rate=risk_free_rate,
+        option_type="put",
     )
 
-with col_width:
+    absolute_delta = abs(estimated_delta)
 
-    width = st.number_input(
-        "Spread width ($)",
-        min_value=0.01,
-        value=5.00,
-        step=0.50,
-        format="%.2f",
+    long_strike = (
+        candidate_strike - spread_width
+    )
+
+else:
+
+    estimated_delta = calculate_option_delta(
+        stock_price=current_price,
+        strike=candidate_strike,
+        volatility=implied_volatility,
+        time_years=time_years,
+        risk_free_rate=risk_free_rate,
+        option_type="call",
+    )
+
+    absolute_delta = abs(estimated_delta)
+
+    long_strike = (
+        candidate_strike + spread_width
     )
 
 
-max_loss = max(
-    width - credit,
-    0,
+# ============================================================
+# DISTANCE
+# ============================================================
+
+distance_dollars = abs(
+    current_price - candidate_strike
+)
+
+distance_percent = (
+    distance_dollars / current_price
+) * 100
+
+atr_distance = calculate_atr_distance(
+    current_price,
+    candidate_strike,
+    current_atr,
 )
 
 
-profit_target = (
-    credit * 0.50
-)
+# ============================================================
+# CANDIDATE OUTPUT
+# ============================================================
 
+st.subheader("Candidate Analysis")
 
-roc = (
-    credit / max_loss * 100
-    if max_loss > 0
-    else 0
-)
+candidate1, candidate2, candidate3, candidate4 = st.columns(4)
 
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
+with candidate1:
 
     st.metric(
-        "Max Loss",
-        f"${max_loss:.2f}",
+        "Estimated Delta",
+        f"{absolute_delta:.2f}",
     )
 
-with col2:
+with candidate2:
 
     st.metric(
-        "50% Buyback",
-        f"${profit_target:.2f}",
+        "Distance",
+        f"${distance_dollars:,.2f}",
     )
 
-with col3:
+with candidate3:
 
     st.metric(
-        "ROC",
-        f"{roc:.1f}%",
+        "Distance %",
+        f"{distance_percent:.2f}%",
     )
+
+with candidate4:
+
+    if atr_distance is not None:
+
+        st.metric(
+            "Distance / ATR",
+            f"{atr_distance:.2f} ATR",
+        )
+
+    else:
+
+        st.metric(
+            "Distance / ATR",
+            "N/A",
+        )
 
 
 # ============================================================
-# CREDIT QUALITY
+# DELTA CHECK
 # ============================================================
 
-st.subheader(
-    "Credit Requirement"
-)
-
-min_credit = st.number_input(
-    "Minimum acceptable credit ($)",
-    min_value=0.00,
-    value=0.50,
-    step=0.05,
-    format="%.2f",
-)
-
-
-credit_ok = (
-    credit >= min_credit
-)
-
-
-if credit_ok:
+if (
+    preferred_delta_low
+    <= absolute_delta
+    <= preferred_delta_high
+):
 
     st.success(
-        f"Credit requirement passes: "
-        f"${credit:.2f} ≥ ${min_credit:.2f}"
+        f"Estimated delta is inside the "
+        f"{preferred_delta_low:.2f}–"
+        f"{preferred_delta_high:.2f} preferred range."
+    )
+
+elif absolute_delta < preferred_delta_low:
+
+    st.info(
+        "Delta is below the preferred range. "
+        "This represents a further-OTM candidate."
     )
 
 else:
 
     st.warning(
-        f"Credit below your minimum: "
-        f"${credit:.2f} < ${min_credit:.2f}"
+        "Delta is above the preferred range. "
+        "Moving the short strike further OTM would reduce "
+        "estimated delta."
     )
 
 
 # ============================================================
-# SECTION 7 — LIQUIDITY
+# ATR CHECK
 # ============================================================
 
-st.header(
-    "7. Liquidity Check"
-)
+if atr_distance is not None:
 
-st.caption(
-    "Liquidity is a practical requirement, "
-    "not a directional filter."
-)
-
-
-bid = st.number_input(
-    "Short-strike bid",
-    min_value=0.0,
-    value=0.00,
-    step=0.01,
-    format="%.2f",
-)
-
-ask = st.number_input(
-    "Short-strike ask",
-    min_value=0.0,
-    value=0.00,
-    step=0.01,
-    format="%.2f",
-)
-
-
-if bid > 0 and ask >= bid:
-
-    bid_ask_width = (
-        ask - bid
-    )
-
-    mid = (
-        bid + ask
-    ) / 2
-
-    spread_pct = (
-        bid_ask_width / mid * 100
-        if mid > 0
-        else 0
-    )
-
-    st.write(
-        f"Bid/ask width: "
-        f"**${bid_ask_width:.2f}**"
-    )
-
-    st.write(
-        f"Spread width as % of mid: "
-        f"**{spread_pct:.1f}%**"
-    )
-
-    if spread_pct <= 10:
+    if atr_distance >= 2:
 
         st.success(
-            "Liquidity looks reasonable."
+            f"Strike is approximately "
+            f"{atr_distance:.2f} ATR from price."
         )
 
-    elif spread_pct <= 20:
+    elif atr_distance >= 1:
 
         st.warning(
-            "Liquidity is getting wider. "
-            "Use caution with fills."
+            f"Strike is approximately "
+            f"{atr_distance:.2f} ATR from price."
         )
 
     else:
 
         st.warning(
-            "Wide bid/ask spread. "
-            "Consider a more liquid strike "
-            "or underlying."
+            f"Strike is only "
+            f"{atr_distance:.2f} ATR from price."
         )
 
-else:
 
-    st.caption(
-        "Enter bid and ask to evaluate liquidity."
+# ============================================================
+# CREDIT
+# ============================================================
+
+st.header("8️⃣ Spread Credit")
+
+credit = st.number_input(
+    "Estimated Credit Received Per Share",
+    min_value=0.00,
+    max_value=float(spread_width),
+    value=min(
+        round(spread_width * 0.20, 2),
+        spread_width,
+    ),
+    step=0.05,
+)
+
+
+metrics = calculate_spread_metrics(
+    width=spread_width,
+    credit=credit,
+    contracts=1,
+)
+
+
+credit_col1, credit_col2, credit_col3 = st.columns(3)
+
+with credit_col1:
+
+    st.metric(
+        "Credit / Contract",
+        f"${metrics['max_profit_per_contract']:,.2f}",
     )
+
+with credit_col2:
+
+    st.metric(
+        "Max Loss / Contract",
+        f"${metrics['max_loss_per_contract']:,.2f}",
+    )
+
+with credit_col3:
+
+    if spread_width > 0:
+
+        reward_risk = (
+            credit
+            / max(spread_width - credit, 0.0001)
+        )
+
+        st.metric(
+            "Credit / Risk",
+            f"{reward_risk:.2f}",
+        )
 
 
 # ============================================================
-# SECTION 8 — POSITION SIZING
+# ACCOUNT & POSITION SIZING
 # ============================================================
 
-st.header(
-    "8. Position Sizing"
-)
+st.header("9️⃣ Position Sizing")
 
-account_size = st.number_input(
-    "Account size ($)",
-    min_value=0.0,
-    value=20000.0,
-    step=500.0,
-    format="%.2f",
-)
+account_col1, account_col2 = st.columns(2)
 
+with account_col1:
 
-risk_pct = st.number_input(
-    "Risk per trade (%)",
-    min_value=0.1,
-    max_value=100.0,
-    value=2.0,
-    step=0.5,
-)
-
-
-max_risk_dollars = (
-    account_size
-    * risk_pct
-    / 100
-)
-
-
-contracts = (
-    int(
-        max_risk_dollars
-        // max_loss
+    account_size = st.number_input(
+        "Account Size ($)",
+        min_value=0.0,
+        value=20000.0,
+        step=500.0,
     )
-    if max_loss > 0
-    else 0
+
+
+with account_col2:
+
+    risk_selection = st.selectbox(
+        "Maximum Account Risk Reference",
+        list(RISK_LEVELS.keys()),
+        index=3,
+    )
+
+
+risk_percent = RISK_LEVELS[risk_selection]
+
+
+contracts, risk_budget, max_loss_per_contract = (
+    calculate_contracts(
+        account_size=account_size,
+        risk_percent=risk_percent,
+        width=spread_width,
+        credit=credit,
+    )
 )
 
 
-actual_risk = (
-    contracts
-    * max_loss
-)
+size_col1, size_col2, size_col3 = st.columns(3)
 
-
-actual_risk_pct = (
-    actual_risk
-    / account_size
-    * 100
-    if account_size > 0
-    else 0
-)
-
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
+with size_col1:
 
     st.metric(
         "Risk Budget",
-        f"${max_risk_dollars:,.0f}",
+        f"${risk_budget:,.2f}",
     )
 
-with col2:
+with size_col2:
 
     st.metric(
-        "Max Contracts",
-        contracts,
+        "Max Loss / Contract",
+        f"${max_loss_per_contract:,.2f}",
     )
 
-with col3:
+with size_col3:
 
     st.metric(
-        "Actual Max Risk",
-        f"${actual_risk:,.0f}",
+        "Contracts",
+        f"{contracts}",
     )
 
 
 if contracts == 0:
 
     st.warning(
-        "One spread exceeds your selected "
-        "risk budget."
+        "The selected risk budget does not cover one "
+        "maximum-loss contract."
     )
 
 else:
 
-    st.success(
-        f"{contracts} contract(s) fit within "
-        f"your {risk_pct:.1f}% risk budget."
+    total_metrics = calculate_spread_metrics(
+        width=spread_width,
+        credit=credit,
+        contracts=contracts,
+    )
+
+    st.info(
+        f"{contracts} contract(s) would represent a maximum "
+        f"loss of approximately "
+        f"${total_metrics['total_max_loss']:,.2f} "
+        f"before fees and slippage."
     )
 
 
 # ============================================================
-# POSITION SIZE TABLE
+# FLEX LADDER
 # ============================================================
 
-st.subheader(
-    "Risk-Level Reference"
+st.header("🔟 OTM Flex Ladder")
+
+st.write(
+    """
+    If the starting strike feels too close to price,
+    the Flex approach is to examine progressively
+    further-OTM strikes rather than automatically
+    abandoning the setup.
+    """
 )
 
-risk_levels = [
-    1,
-    2,
-    3,
-    5,
-    10,
-    15,
-    20,
-]
 
+ladder_rows = []
 
-sizing_rows = []
+# Generate 6 progressively further OTM candidates
+for i in range(6):
 
-for risk_level in risk_levels:
+    if "Bull Put" in spread_type:
 
-    dollars = (
-        account_size
-        * risk_level
-        / 100
-    )
-
-    possible_contracts = (
-        int(
-            dollars
-            // max_loss
+        ladder_strike = (
+            candidate_strike
+            - (i * current_atr * 0.50)
         )
-        if max_loss > 0
-        else 0
+
+        ladder_type = "Put"
+
+    else:
+
+        ladder_strike = (
+            candidate_strike
+            + (i * current_atr * 0.50)
+        )
+
+        ladder_type = "Call"
+
+    if ladder_strike <= 0:
+        continue
+
+    ladder_delta = calculate_option_delta(
+        stock_price=current_price,
+        strike=ladder_strike,
+        volatility=implied_volatility,
+        time_years=time_years,
+        risk_free_rate=risk_free_rate,
+        option_type=(
+            "put"
+            if ladder_type == "Put"
+            else "call"
+        ),
     )
 
-    sizing_rows.append(
+    ladder_abs_delta = abs(ladder_delta)
+
+    ladder_distance = abs(
+        current_price - ladder_strike
+    )
+
+    ladder_atr = calculate_atr_distance(
+        current_price,
+        ladder_strike,
+        current_atr,
+    )
+
+    ladder_rows.append(
         {
-            "Risk %":
-                f"{risk_level}%",
-
-            "Risk Budget":
-                f"${dollars:,.0f}",
-
-            "Contracts":
-                possible_contracts,
-
-            "Max Loss":
-                f"$"
-                f"{possible_contracts * max_loss:,.0f}",
+            "Step": i + 1,
+            "Strike": round(ladder_strike, 2),
+            "Type": ladder_type,
+            "Estimated Delta": round(
+                ladder_abs_delta,
+                3,
+            ),
+            "Distance": round(
+                ladder_distance,
+                2,
+            ),
+            "Distance %": round(
+                ladder_distance
+                / current_price
+                * 100,
+                2,
+            ),
+            "Distance / ATR": (
+                round(ladder_atr, 2)
+                if ladder_atr is not None
+                else None
+            ),
         }
     )
 
 
+ladder_df = pd.DataFrame(ladder_rows)
+
 st.dataframe(
-    pd.DataFrame(
-        sizing_rows
-    ),
-    hide_index=True,
+    ladder_df,
     use_container_width=True,
+    hide_index=True,
 )
 
 
 # ============================================================
-# SECTION 9 — TRADE MANAGEMENT
+# TRADE RULE CHECK
 # ============================================================
 
-st.header(
-    "9. Trade Management"
-)
+st.header("1️⃣1️⃣ OTM Flex Rule Check")
 
-st.subheader(
-    "Profit Target"
-)
-
-st.success(
-    f"Initial profit target: "
-    f"buy back around **${profit_target:.2f}** "
-    f"if you collected ${credit:.2f}."
-)
+rules = []
 
 
-st.subheader(
-    "Threatened Trade Checklist"
+# Trend
+if "Bull Put" in spread_type:
+
+    trend_pass = current_price > current_ema20
+
+    rules.append(
+        {
+            "Rule": "Trend",
+            "Status": (
+                "PASS"
+                if trend_pass
+                else "REVIEW"
+            ),
+            "Details": (
+                "Price above EMA20"
+                if trend_pass
+                else "Price below EMA20"
+            ),
+        }
+    )
+
+else:
+
+    trend_pass = current_price < current_ema20
+
+    rules.append(
+        {
+            "Rule": "Trend",
+            "Status": (
+                "PASS"
+                if trend_pass
+                else "REVIEW"
+            ),
+            "Details": (
+                "Price below EMA20"
+                if trend_pass
+                else "Price above EMA20"
+            ),
+        }
+    )
+
+
+# Delta
+delta_pass = (
+    preferred_delta_low
+    <= absolute_delta
+    <= preferred_delta_high
 )
+
+rules.append(
+    {
+        "Rule": "Delta",
+        "Status": (
+            "PASS"
+            if delta_pass
+            else "REVIEW"
+        ),
+        "Details": (
+            f"Estimated delta = "
+            f"{absolute_delta:.2f}"
+        ),
+    }
+)
+
+
+# Distance
+distance_pass = (
+    atr_distance is not None
+    and atr_distance >= 2
+)
+
+rules.append(
+    {
+        "Rule": "Distance",
+        "Status": (
+            "PASS"
+            if distance_pass
+            else "REVIEW"
+        ),
+        "Details": (
+            f"{atr_distance:.2f} ATR"
+            if atr_distance is not None
+            else "Unavailable"
+        ),
+    }
+)
+
+
+# Credit
+credit_pass = credit > 0
+
+rules.append(
+    {
+        "Rule": "Credit",
+        "Status": (
+            "PASS"
+            if credit_pass
+            else "REVIEW"
+        ),
+        "Details": (
+            f"${credit:.2f} per share"
+        ),
+    }
+)
+
+
+# DTE
+dte_pass = 7 <= dte <= 45
+
+rules.append(
+    {
+        "Rule": "DTE",
+        "Status": (
+            "PASS"
+            if dte_pass
+            else "REVIEW"
+        ),
+        "Details": (
+            f"{dte} DTE"
+        ),
+    }
+)
+
+
+rules_df = pd.DataFrame(rules)
+
+st.dataframe(
+    rules_df,
+    use_container_width=True,
+    hide_index=True,
+)
+
+
+# ============================================================
+# MANAGEMENT
+# ============================================================
+
+st.header("1️⃣2️⃣ Management Framework")
+
+management_col1, management_col2 = st.columns(2)
+
+with management_col1:
+
+    st.subheader("Profit Management")
+
+    st.write(
+        """
+        A commonly used mechanical approach is to
+        consider closing the spread after approximately
+        50% of the original maximum profit has been
+        captured.
+        """
+    )
+
+
+with management_col2:
+
+    st.subheader("Threatened Trade")
+
+    st.write(
+        """
+        If price approaches the short strike, reassess:
+
+        • Trend  
+        • Short-strike delta  
+        • Distance from price  
+        • Remaining DTE  
+        • Maximum remaining risk  
+        • Whether reducing or closing risk is appropriate
+        """
+    )
+
+
+# ============================================================
+# FINAL FLEX SUMMARY
+# ============================================================
+
+st.header("1️⃣3️⃣ Flex Summary")
+
+if "Bull Put" in spread_type:
+
+    direction_text = (
+        "Bull Put Credit Spread"
+    )
+
+else:
+
+    direction_text = (
+        "Bear Call Credit Spread"
+    )
+
 
 st.markdown(
-    """
-Before rolling or adjusting a threatened spread:
+    f"""
+### Current Setup
 
-☐ Is the original EMA20 trend still intact?
+**Ticker:** {ticker}
 
-☐ Has the short-strike delta increased materially?
+**Current / Last Price:** ${current_price:,.2f}
 
-☐ Is the short strike still sufficiently OTM?
+**Direction:** {direction_text}
 
-☐ Has the expected move changed?
+**Short Strike:** ${candidate_strike:,.2f}
 
-☐ Has volatility increased?
+**Spread Width:** ${spread_width:,.2f}
 
-☐ Is there still enough time to expiration?
+**Estimated Delta:** {absolute_delta:.2f}
 
-☐ Would moving further OTM reduce risk?
+**Distance:** ${distance_dollars:,.2f}
+({distance_percent:.2f}%)
 
-☐ Would closing the position preserve more capital?
+**Distance / ATR:** {
+    f"{atr_distance:.2f} ATR"
+    if atr_distance is not None
+    else "N/A"
+}
 
-☐ If rolling, does the new trade actually improve the risk?
+**DTE:** {dte}
+
+**Credit:** ${credit:.2f} per share
+
+**Maximum Loss:** ${
+    metrics["max_loss_per_contract"]:,.2f
+} per contract
 """
 )
 
 
 # ============================================================
-# FINAL OTM FLEX DASHBOARD
+# PHILOSOPHY
 # ============================================================
 
 st.divider()
 
-st.header(
-    "🎯 OTM Flex™ Trade Dashboard"
+st.markdown(
+    """
+### OTM Flex™ Philosophy
+
+**Trend determines direction.**
+
+**Delta identifies the starting zone.**
+
+**Distance is the primary defense.**
+
+**ATR provides a reality check.**
+
+**Flexibility means moving further OTM when needed.**
+
+**Position sizing controls the dollar risk.**
+
+> Stay out of the money.  
+> Stay flexible.  
+> Collect premium.
+"""
 )
 
 
-if side:
-
-    dashboard_rows = [
-        {
-            "Rule":
-                "Direction",
-
-            "Result":
-                direction,
-
-            "Status":
-                "✅",
-        },
-        {
-            "Rule":
-                "Delta",
-
-            "Result":
-                "Target 0.10–0.18",
-
-            "Status":
-                "🎯",
-        },
-        {
-            "Rule":
-                "ATR",
-
-            "Result":
-                f"{low_atr:.1f}–{high_atr:.1f}x",
-
-            "Status":
-                "📏",
-        },
-        {
-            "Rule":
-                "DTE",
-
-            "Result":
-                f"{dte} DTE",
-
-            "Status":
-                (
-                    "✅"
-                    if 7 <= dte <= 45
-                    else "⚠️"
-                ),
-        },
-        {
-            "Rule":
-                "Credit",
-
-            "Result":
-                f"${credit:.2f}",
-
-            "Status":
-                (
-                    "✅"
-                    if credit_ok
-                    else "⚠️"
-                ),
-        },
-        {
-            "Rule":
-                "Profit Target",
-
-            "Result":
-                f"${profit_target:.2f}",
-
-            "Status":
-                "🎯",
-        },
-        {
-            "Rule":
-                "Earnings",
-
-            "Result":
-                (
-                    "Inside expiration"
-                    if earnings_string
-                    and
-                    date.today()
-                    <= date.fromisoformat(
-                        earnings_string
-                    )
-                    <= expiration_estimate
-                    else "Clear / verify"
-                ),
-
-            "Status":
-                (
-                    "⚠️"
-                    if earnings_string
-                    and
-                    date.today()
-                    <= date.fromisoformat(
-                        earnings_string
-                    )
-                    <= expiration_estimate
-                    else "✅"
-                ),
-        },
-        {
-            "Rule":
-                "Position Size",
-
-            "Result":
-                f"{contracts} contract(s)",
-
-            "Status":
-                "📊",
-        },
-    ]
-
-
-    st.dataframe(
-        pd.DataFrame(
-            dashboard_rows
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
 # ============================================================
-# FLEX REMINDER
+# FOOTER
 # ============================================================
-
-st.divider()
-
-st.success(
-    "🟢 OTM FLEX RULE: "
-    "When in doubt, go further OTM — "
-    "not out of the trade."
-)
 
 st.caption(
-    "Trend determines direction. "
-    "Distance determines safety. "
-    "Flexibility determines consistency."
+    "OTM Flex™ is an educational calculator. "
+    "Market prices, option deltas, volatility and "
+    "expected moves are estimates and can change quickly. "
+    "Always verify live option-chain data, bid/ask spreads, "
+    "expiration, liquidity and corporate events before "
+    "placing any trade."
 )
