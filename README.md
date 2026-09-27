@@ -1,119 +1,611 @@
-# OTM Flex Calculator
+OTM Flex™ — Credit Spread Strike Selection Engine
 
-A Streamlit tool that implements the OTM Flex credit-spread rule book:
-**Trend → Delta → Distance → Flex.**
+A manual-first Streamlit calculator for selecting and evaluating credit spread strikes using the OTM Flex™ framework:
 
-Manual data entry for now (price, EMA20, ATR, deltas) — designed so a live
-data source (yfinance, IBKR, etc.) can be dropped in later without changing
-the calculator logic.
+Trend → Delta → Distance → Flex
 
-## What it does
+The app is designed to help structure a credit-spread decision without turning every uncertain market condition into an automatic “no trade.”
 
-1. **Trend** — compares price to EMA20 to pick Bull Put Spread vs Bear Call Spread, then
-   scores trend **strength automatically** (Strong / Average / Choppy) from three factors
-   you enter off your chart, each worth 0–2 points (6 max):
-   - EMA stack alignment (EMA20 vs EMA50 vs EMA200)
-   - RSI zone (healthy trend range vs weak/overextended)
-   - MACD line vs signal line and histogram direction
-   Score 5–6 → Strong, 3–4 → Average, 0–2 → Choppy. The breakdown is shown in an expander
-   so you can see exactly why it landed where it did.
-2. **Distance** — computes 1x–3x ATR strikes and flags which multiples fit your
-   stated trend strength (strong/average/choppy).
-3. **Delta cross-check** — an editable table where you enter candidate strikes
-   and their deltas; it flags which ones hit both the 0.10–0.18 delta band
-   *and* the ATR distance guideline, and suggests the closest qualifying
-   strike (the "golden rule" pick).
-4. **Expiration** — flags whether your chosen DTE is inside the typical 7–45
-   DTE window.
-5. **Credit & profit target** — max loss, 50%-of-credit profit target, and
-   return on capital at risk.
-6. **Position sizing** — max contracts given your account size and risk %
-   per trade.
+⸻
 
-## Auto-fetch (free, via Yahoo Finance)
+Features
 
-Section 0 lets you type a ticker and pull real data for free (delayed ~15–20
-min, no account or API key needed):
+Trend
 
-- **Price, EMA20/50/200, RSI, MACD, ATR** — computed from Yahoo Finance
-  daily bars (`yfinance`). Pre-fills the Trend and Distance sections; every
-  value stays editable afterward.
-- **Delta estimate** — Section 3 can load a ticker's expirations and pull
-  its option chain. Yahoo doesn't publish delta directly, so the app
-  computes it itself with **Black-Scholes**, using Yahoo's implied
-  volatility as the input. This is a close approximation to your broker's
-  real-time delta for liquid names, but it's delayed and won't match
-  exactly — treat it as a free starting point, not a replacement for your
-  broker's live Greeks.
+The app determines the initial direction from EMA20:
 
-If a fetch fails (bad ticker, no expirations, rate limiting), the app shows
-the error and leaves existing values untouched — nothing crashes, you just
-fall back to typing numbers in by hand.
+* Price > EMA20 → Bull Put Spread
+* Price < EMA20 → Bear Call Spread
 
-## Earnings check (rule 11) and Expected Move
+EMA20, EMA50 and EMA200 are also used to describe trend strength.
 
-- **Section 4** now checks the ticker's next earnings date (fetched for free
-  alongside price data in Section 0) against your chosen DTE, and warns if
-  earnings fall inside the trade window — your rule book's rule 11.
-  Yahoo doesn't always have an earnings date for every ticker; if it's
-  missing, the app says so rather than guessing.
-- Section 4 also shows an **Expected Move**: `price × ATM IV × sqrt(DTE/365)`,
-  the standard one-standard-deviation move implied by the option market.
-  It auto-fills from the ATM strike's implied volatility if you fetched a
-  chain in Section 3, or you can type an IV in by hand. Compare it against
-  the ATR ladder in Section 2 — if the IV-implied move is much wider than
-  ATR suggests, the market is pricing more risk than the chart alone shows.
+⸻
 
-## Run locally
+Momentum
 
-```bash
+The app displays:
+
+* RSI
+* MACD line
+* MACD signal
+* EMA alignment
+
+These produce a Strong / Average / Choppy-Uncertain context score.
+
+Momentum does not automatically reject a trade.
+
+⸻
+
+Delta
+
+The primary short-strike target is:
+
+0.10–0.18 delta
+
+The app can calculate an estimated Black-Scholes delta from the Yahoo Finance option chain.
+
+The delta calculation can also be overridden manually.
+
+⸻
+
+Distance
+
+ATR is used as a reality check.
+
+OTM Flex guidelines:
+
+Trend	ATR distance
+Strong	1–2 ATR
+Average	Around 2 ATR
+Choppy / uncertain	2–3 ATR
+
+Distance is treated as a major part of risk management.
+
+⸻
+
+Flex Ladder
+
+The app identifies a starting strike and then displays progressively further-OTM strikes.
+
+Example:
+
+650 → 645 → 640 → 635
+
+If the original strike feels too close:
+
+Move further OTM.
+
+The app does not automatically cancel the trade simply because the market is choppy or volatility is elevated.
+
+⸻
+
+Expected Move
+
+The app calculates a volatility-based expected move:
+
+Expected Move =
+Price × IV × √(DTE / 365)
+
+This is displayed alongside ATR so the user can compare:
+
+* Strike distance
+* ATR
+* Implied expected move
+
+The expected move is a reference, not a guarantee.
+
+⸻
+
+Earnings
+
+The app attempts to retrieve the next earnings date from Yahoo Finance.
+
+If earnings fall inside the selected expiration window, the app displays a warning.
+
+Always verify the earnings date with your broker before entering a trade.
+
+⸻
+
+Credit
+
+The app calculates:
+
+* Credit received
+* Maximum loss
+* 50% profit target
+* Return on risk
+
+For example:
+
+$5.00 wide spread
+$1.00 credit
+Maximum profit = $1.00
+Maximum loss = $4.00
+50% profit target = $0.50
+
+⸻
+
+Position Sizing
+
+The position-sizing calculator uses:
+
+Risk Budget =
+Account Size × Risk %
+
+Then:
+
+Maximum Contracts =
+Risk Budget ÷ Maximum Loss Per Contract
+
+For standard U.S. ETF options, one contract normally represents 100 shares.
+
+Example:
+
+$20,000 account
+2% risk
+= $400 risk budget
+$5-wide spread
+$1.00 credit
+= $400 maximum loss per contract
+Maximum contracts = 1
+
+The app also displays several risk levels for comparison.
+
+These are calculations, not recommended position sizes.
+
+⸻
+
+Files
+
+The project contains three files:
+
+otm-flex/
+│
+├── app.py
+├── requirements.txt
+└── README.md
+
+⸻
+
+Installation
+
+1. Install Python
+
+Use Python 3.10 or newer.
+
+Check your version:
+
+python --version
+
+or:
+
+python3 --version
+
+⸻
+
+2. Install the required packages
+
+From the project folder:
+
 pip install -r requirements.txt
+
+If your computer uses python3:
+
+pip3 install -r requirements.txt
+
+⸻
+
+Run the Streamlit App
+
+From the same folder:
+
 streamlit run app.py
-```
 
-## Push to GitHub
+Streamlit should open the application in your browser.
 
-```bash
-git init
-git add .
-git commit -m "Initial OTM Flex calculator"
-git branch -M main
-git remote add origin <your-repo-url>
-git push -u origin main
-```
+If it doesn’t, Streamlit will display a local address similar to:
 
-## Deploy to Streamlit Community Cloud (free, works from your phone)
+http://localhost:8501
 
-1. Push this folder to a GitHub repo (public or private both work):
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial OTM Flex calculator"
-   git branch -M main
-   git remote add origin <your-repo-url>
-   git push -u origin main
-   ```
-2. Go to **share.streamlit.io** and sign in with your GitHub account.
-3. Click **New app**, pick this repo, the `main` branch, and `app.py` as
-   the entry point.
-4. Click **Deploy** — Streamlit installs everything in `requirements.txt`
-   automatically. First deploy takes a minute or two.
-5. You'll get a public URL like `https://<your-app-name>.streamlit.app` —
-   open that on your phone and bookmark it.
+Open that address in your browser.
 
-**Worth knowing:** on the free tier, anyone with the link can open the app
-— there's no login screen. Don't put anything you wouldn't want a stranger
-to see (it only holds numbers you type in each session, nothing is saved
-between visits, but keep that in mind if you ever add the trade log). If
-you update the code later, just `git push` again — Streamlit Cloud
-redeploys automatically from the connected repo.
+⸻
 
-## Next steps (when you're ready to wire up live data)
+Using the App
 
-- Swap the manual `price` / `ema20` / `atr` inputs for a `yfinance` (or IBKR)
-  fetch, keeping the rest of the calculation logic untouched.
-- Replace the manual delta table with a live option-chain pull, filtered to
-  strikes near the ATR-implied range before you even look at delta.
-- The core functions (`evaluate_row`, the ATR table logic) are pure and
-  don't touch Streamlit state, so they can be lifted into a separate
-  `logic.py` module and unit-tested once the app grows.
+Step 1 — Enter the ticker
+
+Example:
+
+SPY
+
+Then select:
+
+Fetch Price & Indicators
+
+The app attempts to retrieve:
+
+* Current price
+* EMA20
+* EMA50
+* EMA200
+* RSI
+* MACD
+* ATR
+* Approximate earnings date
+
+All of these remain manually editable.
+
+⸻
+
+Step 2 — Confirm direction
+
+The basic OTM Flex direction is:
+
+Price > EMA20
+        ↓
+Bull Put Spread
+
+or:
+
+Price < EMA20
+        ↓
+Bear Call Spread
+
+⸻
+
+Step 3 — Check trend context
+
+Review:
+
+* EMA stack
+* RSI
+* MACD
+
+The app categorizes the environment as:
+
+Strong
+Average
+Choppy / Uncertain
+
+This is context rather than an automatic trade blocker.
+
+⸻
+
+Step 4 — Check ATR
+
+Determine the approximate distance from the current price.
+
+For example:
+
+SPY = $650
+ATR = $5
+
+Then:
+
+1 ATR = $5
+2 ATR = $10
+3 ATR = $15
+
+For a Bull Put:
+
+1 ATR → $645
+2 ATR → $640
+3 ATR → $635
+
+For a Bear Call:
+
+1 ATR → $655
+2 ATR → $660
+3 ATR → $665
+
+Actual strikes are rounded according to the selected strike increment.
+
+⸻
+
+Step 5 — Load the Option Chain
+
+Select:
+
+Load Expirations
+
+Then select an expiration and:
+
+Fetch Option Chain
+
+The app calculates an estimated delta using:
+
+* Current price
+* Strike
+* Implied volatility
+* Risk-free rate
+* DTE
+
+The target zone is:
+
+0.10–0.18 delta
+
+⸻
+
+Step 6 — Apply Flex
+
+The process is:
+
+Trend
+   ↓
+Find 0.10–0.18 delta
+   ↓
+Check ATR distance
+   ↓
+Check expected move
+   ↓
+Check credit
+   ↓
+Check liquidity
+   ↓
+If uncomfortable:
+move further OTM
+
+The Flex ladder allows you to compare multiple strikes rather than automatically abandoning the setup.
+
+⸻
+
+Step 7 — Check Expiration
+
+The typical OTM Flex range is:
+
+7–45 DTE
+
+The app also checks the approximate earnings date.
+
+If earnings fall inside the expiration period, review the position before proceeding.
+
+⸻
+
+Step 8 — Check Credit
+
+Enter:
+
+* Credit received
+* Spread width
+* Minimum acceptable credit
+
+The calculator determines:
+
+Maximum profit
+Maximum loss
+50% profit target
+Return on risk
+
+For example:
+
+$5 spread
+$0.80 credit
+Maximum profit:
+$80 per contract
+Maximum loss:
+$420 per contract
+50% profit target:
+$40
+
+⸻
+
+Step 9 — Position Size
+
+Enter:
+
+Account size
+Risk per trade %
+
+The calculator determines the corresponding risk budget and maximum number of contracts based on the spread’s maximum loss.
+
+Remember:
+
+Maximum loss =
+(Spread Width − Credit) × 100
+
+for a standard 100-share option contract.
+
+⸻
+
+Step 10 — Manage the Trade
+
+The OTM Flex profit-taking rule is approximately:
+
+50% of maximum profit
+
+If a position becomes threatened, review:
+
+1. EMA20 trend
+2. Short-strike delta
+3. Distance from price
+4. ATR
+5. Expected move
+6. Volatility
+7. Time remaining
+
+Possible actions include:
+
+* Closing
+* Reducing risk
+* Moving further OTM
+* Rolling if the new position still makes sense
+
+The app does not automatically execute trades or recommend a roll.
+
+⸻
+
+Important Data Notes
+
+Yahoo Finance
+
+The free Yahoo Finance connection is useful for research and screening, but it should not be treated as a real-time broker feed.
+
+Option quotes may be delayed or incomplete.
+
+Always verify:
+
+* Bid
+* Ask
+* Last price
+* Open interest
+* Volume
+* Implied volatility
+* Earnings
+* Expiration
+
+with your broker before placing an order.
+
+⸻
+
+Black-Scholes Delta
+
+The calculated delta is an estimate.
+
+Actual broker-provided option Greeks may differ because of:
+
+* Volatility surface
+* Interest rates
+* Dividends
+* Pricing models
+* Market conditions
+* Data timing
+
+For ETF options, the dividend yield can also affect theoretical delta.
+
+The app therefore allows manual adjustment.
+
+⸻
+
+No Trade Execution
+
+OTM Flex is a calculator and decision-support tool.
+
+It does not:
+
+* Place trades
+* Connect to your brokerage account
+* Automatically sell options
+* Automatically roll positions
+* Guarantee probability of profit
+* Guarantee that a strike will remain OTM
+
+⸻
+
+OTM Flex Core Philosophy
+
+The system is intentionally simple:
+
+TREND
+  ↓
+DIRECTION
+  ↓
+DELTA
+  ↓
+DISTANCE
+  ↓
+ATR
+  ↓
+FLEX
+  ↓
+CREDIT
+  ↓
+RISK
+
+The defining rule is:
+
+When in doubt, go further OTM — not out of the trade.
+
+And the motto:
+
+Stay out of the money. Stay flexible. Collect premium.
+
+⸻
+
+Troubleshooting
+
+Yahoo Finance doesn’t return data
+
+Try:
+
+SPY
+QQQ
+IWM
+VOO
+DIA
+
+If one ticker doesn’t work, check whether Yahoo Finance recognizes the symbol.
+
+⸻
+
+Option chain doesn’t load
+
+Yahoo Finance can temporarily rate-limit requests.
+
+Try:
+
+1. Wait a few minutes.
+2. Refresh the app.
+3. Try another ticker.
+4. Enter the option data manually.
+
+The app is intentionally designed to continue working with manual inputs.
+
+⸻
+
+Streamlit doesn’t start
+
+Try:
+
+python -m streamlit run app.py
+
+instead of:
+
+streamlit run app.py
+
+⸻
+
+Running From GitHub / Streamlit Community Cloud
+
+Upload:
+
+app.py
+requirements.txt
+README.md
+
+to a GitHub repository.
+
+When creating a Streamlit deployment, select:
+
+Main file:
+app.py
+
+Streamlit will use:
+
+requirements.txt
+
+to install:
+
+* Streamlit
+* pandas
+* yfinance
+
+No API key is required for the Yahoo Finance data used by this version.
+
+⸻
+
+Project Goal
+
+OTM Flex is intended to make the credit-spread process repeatable:
+
+Trend determines direction.
+
+Delta finds the starting strike.
+
+Distance provides the primary risk buffer.
+
+ATR provides a reality check.
+
+Flex provides another OTM choice when the first strike feels too close.
+
+Credit and position sizing determine whether the spread fits the trade plan.
