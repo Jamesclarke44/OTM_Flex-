@@ -50,6 +50,20 @@ If a fetch fails (bad ticker, no expirations, rate limiting), the app shows
 the error and leaves existing values untouched — nothing crashes, you just
 fall back to typing numbers in by hand.
 
+## Earnings check (rule 11) and Expected Move
+
+- **Section 4** now checks the ticker's next earnings date (fetched for free
+  alongside price data in Section 0) against your chosen DTE, and warns if
+  earnings fall inside the trade window — your rule book's rule 11.
+  Yahoo doesn't always have an earnings date for every ticker; if it's
+  missing, the app says so rather than guessing.
+- Section 4 also shows an **Expected Move**: `price × ATM IV × sqrt(DTE/365)`,
+  the standard one-standard-deviation move implied by the option market.
+  It auto-fills from the ATM strike's implied volatility if you fetched a
+  chain in Section 3, or you can type an IV in by hand. Compare it against
+  the ATR ladder in Section 2 — if the IV-implied move is much wider than
+  ATR suggests, the market is pricing more risk than the chart alone shows.
+
 ## Run locally
 
 ```bash
@@ -67,6 +81,32 @@ git branch -M main
 git remote add origin <your-repo-url>
 git push -u origin main
 ```
+
+## Deploy to Streamlit Community Cloud (free, works from your phone)
+
+1. Push this folder to a GitHub repo (public or private both work):
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial OTM Flex calculator"
+   git branch -M main
+   git remote add origin <your-repo-url>
+   git push -u origin main
+   ```
+2. Go to **share.streamlit.io** and sign in with your GitHub account.
+3. Click **New app**, pick this repo, the `main` branch, and `app.py` as
+   the entry point.
+4. Click **Deploy** — Streamlit installs everything in `requirements.txt`
+   automatically. First deploy takes a minute or two.
+5. You'll get a public URL like `https://<your-app-name>.streamlit.app` —
+   open that on your phone and bookmark it.
+
+**Worth knowing:** on the free tier, anyone with the link can open the app
+— there's no login screen. Don't put anything you wouldn't want a stranger
+to see (it only holds numbers you type in each session, nothing is saved
+between visits, but keep that in mind if you ever add the trade log). If
+you update the code later, just `git push` again — Streamlit Cloud
+redeploys automatically from the connected repo.
 
 ## Next steps (when you're ready to wire up live data)
 
