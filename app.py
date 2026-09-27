@@ -14,7 +14,7 @@ Run locally:
     streamlit run app.py
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import math
 
 import streamlit as st
@@ -72,6 +72,40 @@ def round_to_increment(value, increment, option_side):
     return round(steps * increment, 2)
 
 
+def get_next_earnings_date(ticker_symbol):
+    """Best-effort free lookup of the next earnings date. Returns a date or None.
+
+    yfinance's earnings-date API has changed across versions, so this tries
+    a couple of approaches and quietly gives up rather than crashing the app.
+    """
+    try:
+        tk = yf.Ticker(ticker_symbol)
+        try:
+            edf = tk.get_earnings_dates(limit=8)
+            if edf is not None and not edf.empty:
+                today_ts = pd.Timestamp(date.today())
+                idx = edf.index
+                idx_naive = idx.tz_localize(None) if idx.tz is not None else idx
+                future = edf.loc[idx_naive >= today_ts]
+                if not future.empty:
+                    return future.index[0].date() if future.index[0].tz is None else future.index[0].tz_localize(None).date()
+        except Exception:
+            pass
+        try:
+            cal = tk.calendar
+            if isinstance(cal, dict) and cal.get("Earnings Date"):
+                d = cal["Earnings Date"][0]
+                return d if isinstance(d, date) and not isinstance(d, datetime) else pd.Timestamp(d).date()
+            elif hasattr(cal, "loc"):
+                d = cal.loc["Earnings Date"].iloc[0]
+                return pd.Timestamp(d).date()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 0. Auto-Fetch Market Data (optional, free via Yahoo Finance)
 # ---------------------------------------------------------------------------
@@ -118,15 +152,23 @@ if st.button("Fetch price & indicators"):
             atr_series = true_range.ewm(alpha=1 / 14, adjust=False).mean()
             st.session_state["atr"] = round(float(atr_series.iloc[-1]), 2)
 
+            next_earnings = get_next_earnings_date(ticker)
+            st.session_state["next_earnings_date"] = next_earnings.isoformat() if next_earnings else None
+
             st.session_state["data_fetched_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             st.session_state.pop("expirations", None)  # force reload for new ticker
             st.session_state.pop("delta_source_df", None)  # clear stale chain data
+            st.session_state.pop("atm_iv", None)  # clear stale IV from a previous ticker
             st.success(f"Fetched {ticker} — latest bar {hist.index[-1].date()}")
     except Exception as exc:  # noqa: BLE001 - surface any fetch problem to the user
         st.error(f"Fetch failed: {exc}")
 
 if st.session_state.get("data_fetched_at"):
     st.caption(f"Last fetched: {st.session_state['data_fetched_at']} for {ticker}")
+    if st.session_state.get("next_earnings_date"):
+        st.caption(f"Next earnings (approx, per Yahoo Finance): {st.session_state['next_earnings_date']}")
+    else:
+        st.caption("Next earnings date not available for this ticker from Yahoo Finance.")
 
 # ---------------------------------------------------------------------------
 # 1. Trend
@@ -309,26 +351,39 @@ low_mult, high_mult = atr_guidance[trend_strength]
 
 st.write(f"Guideline for **{trend_strength}** trend: **{low_mult}–{high_mult} ATR** away from price.")
 
+# List every real strike (at the increment above) from 1x to 3x ATR away, closest to furthest,
+# so you see the whole ladder rather than just a few sample points.
 atr_rows = []
-for mult in [1.0, 1.5, 2.0, 2.5, 3.0]:
-    distance = atr * mult
-    if side == "put":
-        strike = round_to_increment(price - distance, strike_increment, side)
-    elif side == "call":
-        strike = round_to_increment(price + distance, strike_increment, side)
-    else:
-        strike = None
-    in_range = low_mult <= mult <= high_mult
-    atr_rows.append(
+if side == "put":
+    near_strike = round_to_increment(price - atr * 1.0, strike_increment, side)
+    far_strike = round_to_increment(price - atr * 3.0, strike_increment, side)
+    s = near_strike
+    while s >= far_strike:
+        atr_rows.append(s)
+        s = round(s - strike_increment, 2)
+elif side == "call":
+    near_strike = round_to_increment(price + atr * 1.0, strike_increment, side)
+    far_strike = round_to_increment(price + atr * 3.0, strike_increment, side)
+    s = near_strike
+    while s <= far_strike:
+        atr_rows.append(s)
+        s = round(s + strike_increment, 2)
+
+atr_table_rows = []
+for strike in atr_rows:
+    distance = abs(price - strike)
+    atr_mult = distance / atr if atr else None
+    in_range = (atr_mult is not None) and (low_mult <= atr_mult <= high_mult)
+    atr_table_rows.append(
         {
-            "ATR multiple": f"{mult}x",
+            "Strike": strike,
             "Distance ($)": round(distance, 2),
-            "Implied strike": strike if strike is not None else "—",
+            "ATR multiple": round(atr_mult, 2) if atr_mult is not None else "—",
             "Within guideline": "✅" if in_range else "",
         }
     )
 
-st.dataframe(pd.DataFrame(atr_rows), hide_index=True, use_container_width=True)
+st.dataframe(pd.DataFrame(atr_table_rows), hide_index=True, use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # 3. Delta cross-check
@@ -377,6 +432,16 @@ if side is not None:
                 chain = yf.Ticker(ticker).option_chain(chosen_exp)
                 chain_df = chain.puts if side == "put" else chain.calls
                 years_to_exp = max((date.fromisoformat(chosen_exp) - today).days, 0) / 365
+
+                # Capture ATM implied vol (closest strike to price) for the Expected Move calc,
+                # using the full chain before filtering down to the OTM delta band below.
+                if not chain_df.empty and "strike" in chain_df.columns:
+                    atm_row = chain_df.iloc[(chain_df["strike"] - price).abs().argsort().iloc[0]]
+                    atm_iv_val = atm_row.get("impliedVolatility")
+                    if atm_iv_val and atm_iv_val > 0:
+                        st.session_state["atm_iv"] = round(float(atm_iv_val) * 100, 1)
+                        st.session_state["atm_iv_dte"] = round(years_to_exp * 365)
+
                 rows = []
                 for _, r in chain_df.iterrows():
                     iv = r.get("impliedVolatility")
@@ -496,6 +561,53 @@ if 7 <= dte <= 45:
     st.success(f"{dte} DTE is within the typical 7–45 DTE range.")
 else:
     st.warning(f"{dte} DTE is outside the typical 7–45 DTE range — proceed deliberately.")
+
+expiration_estimate = date.today() + timedelta(days=dte)
+
+st.subheader("Earnings Check (Rule 11)")
+next_earnings_str = st.session_state.get("next_earnings_date")
+if next_earnings_str:
+    next_earnings_date = date.fromisoformat(next_earnings_str)
+    st.write(
+        f"Next earnings for **{ticker}** (approx, per Yahoo Finance): **{next_earnings_date.isoformat()}** "
+        f"— this trade's estimated expiration: **{expiration_estimate.isoformat()}**"
+    )
+    if date.today() <= next_earnings_date <= expiration_estimate:
+        st.error(
+            "⚠️ Earnings fall inside this DTE window. Rule 11: avoid holding stock spreads through earnings."
+        )
+    else:
+        st.success("No earnings expected before this expiration.")
+else:
+    st.caption(
+        "Next earnings date not available — fetch price data in Section 0, or check your broker's calendar manually."
+    )
+
+st.subheader("Expected Move (IV-based)")
+st.caption(
+    "A second reality check alongside the ATR ladder in Section 2: how far the option market's "
+    "implied volatility says price could move by expiration."
+)
+default_iv = st.session_state.get("atm_iv", 20.0)
+atm_iv_pct = st.number_input(
+    "ATM implied volatility (%)",
+    min_value=0.1,
+    max_value=300.0,
+    value=default_iv,
+    step=0.5,
+    help="Auto-filled from the live chain fetch in Section 3 if you loaded one there; otherwise enter it manually.",
+)
+years_for_em = dte / 365
+expected_move = price * (atm_iv_pct / 100) * math.sqrt(years_for_em)
+em_atr_mult = expected_move / atr if atr else None
+
+col_em1, col_em2 = st.columns(2)
+col_em1.metric("Expected move (1 SD, to expiration)", f"±${expected_move:.2f}")
+col_em2.metric("Expected move in ATR multiples", f"{em_atr_mult:.2f}x" if em_atr_mult is not None else "—")
+st.caption(
+    "If this is much wider than your ATR-based distance in Section 2, the option market is pricing in "
+    "more risk than the chart alone suggests — worth leaning further OTM per the Flex Rule."
+)
 
 # ---------------------------------------------------------------------------
 # 5. Credit & profit target
