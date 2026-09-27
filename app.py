@@ -15,7 +15,7 @@ import pandas as pd
 st.set_page_config(page_title="OTM Flex Calculator", page_icon="📉", layout="centered")
 
 st.title("📉 OTM Flex — Strike Selection Calculator")
-st.caption("Trend → Delta → Distance → Flex. Manual data entry (live data source pluggable later).")
+st.caption("Trend → Delta → Distance → Flex. Manual data entry; trend strength is scored automatically from EMA20/50/200, RSI, and MACD.")
 
 with st.expander("Rule book summary", expanded=False):
     st.markdown(
@@ -36,11 +36,15 @@ with st.expander("Rule book summary", expanded=False):
 # ---------------------------------------------------------------------------
 st.header("1. Trend")
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     price = st.number_input("Current price", min_value=0.01, value=100.00, step=0.01, format="%.2f")
 with col2:
     ema20 = st.number_input("EMA20", min_value=0.01, value=98.00, step=0.01, format="%.2f")
+with col3:
+    ema50 = st.number_input("EMA50", min_value=0.01, value=96.00, step=0.01, format="%.2f")
+
+ema200 = st.number_input("EMA200", min_value=0.01, value=90.00, step=0.01, format="%.2f")
 
 if price > ema20:
     direction = "Bull Put Spread"
@@ -55,12 +59,100 @@ else:
     side = None
     st.warning("Price equals EMA20 — no clear trend signal. Consider waiting or checking a longer timeframe.")
 
-trend_strength = st.radio(
-    "Trend strength (your read on chart/context)",
-    options=["Strong", "Average", "Choppy / uncertain"],
-    index=1,
-    horizontal=True,
-)
+# ---------------------------------------------------------------------------
+# 1b. Momentum inputs (feed the auto trend-strength score)
+# ---------------------------------------------------------------------------
+st.subheader("Momentum (for automatic trend strength)")
+col4, col5, col6 = st.columns(3)
+with col4:
+    rsi = st.number_input("RSI (14)", min_value=0.0, max_value=100.0, value=55.0, step=0.5)
+with col5:
+    macd_line = st.number_input("MACD line", value=0.30, step=0.01, format="%.2f")
+with col6:
+    macd_signal = st.number_input("MACD signal", value=0.15, step=0.01, format="%.2f")
+
+macd_hist = macd_line - macd_signal
+
+
+def score_ema_stack(side, ema20, ema50, ema200):
+    if side == "put":  # bullish stack expected
+        if ema20 > ema50 > ema200:
+            return 2, "Full bullish stack (EMA20 > EMA50 > EMA200)"
+        elif ema20 > ema50:
+            return 1, "Partial bullish stack (EMA20 > EMA50, but EMA50 ≤ EMA200)"
+        else:
+            return 0, "No bullish stack"
+    elif side == "call":  # bearish stack expected
+        if ema20 < ema50 < ema200:
+            return 2, "Full bearish stack (EMA20 < EMA50 < EMA200)"
+        elif ema20 < ema50:
+            return 1, "Partial bearish stack (EMA20 < EMA50, but EMA50 ≥ EMA200)"
+        else:
+            return 0, "No bearish stack"
+    return 0, "No trend direction"
+
+
+def score_rsi(side, rsi):
+    if side == "put":
+        if 50 <= rsi <= 70:
+            return 2, "RSI in healthy uptrend zone (50–70)"
+        elif 40 <= rsi < 50 or 70 < rsi <= 80:
+            return 1, "RSI borderline (40–50 or 70–80)"
+        else:
+            return 0, "RSI too weak (<40) or overextended (>80)"
+    elif side == "call":
+        if 30 <= rsi <= 50:
+            return 2, "RSI in healthy downtrend zone (30–50)"
+        elif 20 <= rsi < 30 or 50 < rsi <= 60:
+            return 1, "RSI borderline (20–30 or 50–60)"
+        else:
+            return 0, "RSI too weak (>60) or overextended (<20)"
+    return 0, "No trend direction"
+
+
+def score_macd(side, macd_line, macd_signal, macd_hist):
+    if side == "put":
+        if macd_line > macd_signal and macd_hist > 0:
+            return 2, "MACD above signal, rising histogram"
+        elif macd_line > macd_signal:
+            return 1, "MACD above signal, but histogram flat/falling"
+        else:
+            return 0, "MACD below signal"
+    elif side == "call":
+        if macd_line < macd_signal and macd_hist < 0:
+            return 2, "MACD below signal, falling histogram"
+        elif macd_line < macd_signal:
+            return 1, "MACD below signal, but histogram flat/rising"
+        else:
+            return 0, "MACD above signal"
+    return 0, "No trend direction"
+
+
+ema_pts, ema_note = score_ema_stack(side, ema20, ema50, ema200)
+rsi_pts, rsi_note = score_rsi(side, rsi)
+macd_pts, macd_note = score_macd(side, macd_line, macd_signal, macd_hist)
+total_score = ema_pts + rsi_pts + macd_pts
+
+if total_score >= 5:
+    trend_strength = "Strong"
+elif total_score >= 3:
+    trend_strength = "Average"
+else:
+    trend_strength = "Choppy / uncertain"
+
+st.markdown(f"**Auto trend strength: {trend_strength}** (score {total_score}/6)")
+with st.expander("Trend strength breakdown", expanded=False):
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"Factor": "EMA stack", "Points": f"{ema_pts}/2", "Detail": ema_note},
+                {"Factor": "RSI", "Points": f"{rsi_pts}/2", "Detail": rsi_note},
+                {"Factor": "MACD", "Points": f"{macd_pts}/2", "Detail": macd_note},
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 # ---------------------------------------------------------------------------
 # 2. Distance (ATR reality check)
